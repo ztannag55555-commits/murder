@@ -1,0 +1,1142 @@
+--[[
+    ZYON FARM v7.7 COIN_SERVER TEST
+
+    NOVO:
+    - Farm de Evento ON/OFF (padrao OFF)
+    - Reconhecimento de Coin_Server (BasePart) dentro de CoinContainer
+    - Resetar ao encher o saco: ON/OFF
+    - Padrão: OFF
+    - Reset apenas uma vez por partida
+
+    MANTIDO:
+    - Farm de Coin_Server
+    - Distância padrão: 1.5 studs abaixo da moeda
+    - Velocidade: 10 a 30
+    - Descida inicial abaixo do piso
+    - Personagem deitado
+    - Voo e noclip
+    - Detecção de partida pelo RoleSelector
+    - Detecção de bolsa cheia
+    - Interface preta e roxa, arrastável
+    - RightShift: mostrar/ocultar
+    - X: encerrar e restaurar
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
+
+local KEY = "_ZYON_FARM_V77"
+
+if type(shared[KEY]) == "function" then
+    pcall(shared[KEY])
+end
+
+local Running = true
+local Enabled = false
+
+local Config = {
+    Speed = 20,
+    Distance = 1.5,
+    WaitTime = 0.5,
+    ScanInterval = 0.3,
+    InitialDrop = 4,
+    MaxInitialDescent = 35,
+
+    -- NOVA OPÇÃO
+    ResetOnFullBag = false,
+    FarmEvento = false -- independente, padrao OFF
+}
+
+local Character
+local Humanoid
+local Root
+local Animate
+
+local Flying = false
+local Original = {}
+local Collisions = {}
+
+local Attachment
+local Velocity
+
+local RoundActive = false
+local BagFull = false
+local ResetRequested = false
+
+local RoleSelector
+local RoleConnection
+local LastRoleVisible = false
+
+local Coins = {}
+local Ignored = {}
+
+local Target
+local TargetPosition
+local ReachedAt
+
+local Status = "Desativado"
+
+local NeedsInitialDrop = true
+local InitialDropTarget = nil
+local InitialDropAttempted = false
+local DropStatus = "Aguardando"
+
+local Connections = {}
+local CharacterConnections = {}
+
+-- ====================================
+-- CONEXÕES
+-- ====================================
+
+local function connect(signal, callback, list)
+    local connection = signal:Connect(callback)
+    table.insert(list or Connections, connection)
+    return connection
+end
+
+local function disconnect(list)
+    for _, connection in ipairs(list) do
+        pcall(function()
+            connection:Disconnect()
+        end)
+    end
+    table.clear(list)
+end
+
+local function validCharacter()
+    return Character
+        and Character.Parent
+        and Root
+        and Root.Parent
+        and Humanoid
+        and Humanoid.Health > 0
+        and Player.Character == Character
+end
+
+local function resetTarget()
+    Target = nil
+    TargetPosition = nil
+    ReachedAt = nil
+end
+
+-- ====================================
+-- ANIMAÇÕES
+-- ====================================
+
+local function stopAnimations()
+    if not Humanoid then return end
+
+    local animator = Humanoid:FindFirstChildOfClass("Animator")
+
+    if animator then
+        for _, track in ipairs(
+            animator:GetPlayingAnimationTracks()
+        ) do
+            track:Stop(0)
+        end
+    end
+end
+
+-- ====================================
+-- NOCLIP
+-- ====================================
+
+local function noclip()
+    if not Character then return end
+
+    for _, object in ipairs(Character:GetDescendants()) do
+        if object:IsA("BasePart") then
+            if Collisions[object] == nil then
+                Collisions[object] = object.CanCollide
+            end
+
+            object.CanCollide = false
+        end
+    end
+end
+
+local function restoreCollisions()
+    for part, original in pairs(Collisions) do
+        if part and part.Parent then
+            part.CanCollide = original
+        end
+    end
+
+    table.clear(Collisions)
+end
+
+-- ====================================
+-- POSE DEITADA
+-- ====================================
+
+local function lieRotation()
+    if not Original.Rotation then
+        return nil
+    end
+
+    return Original.Rotation
+        * CFrame.Angles(math.rad(90), 0, 0)
+end
+
+-- ====================================
+-- PARAR VOO
+-- ====================================
+
+local function stopFlight()
+    if Velocity then
+        Velocity:Destroy()
+        Velocity = nil
+    end
+
+    if Attachment then
+        Attachment:Destroy()
+        Attachment = nil
+    end
+
+    restoreCollisions()
+
+    if Flying then
+        if Root and Root.Parent then
+            Root.AssemblyLinearVelocity = Vector3.zero
+            Root.AssemblyAngularVelocity = Vector3.zero
+
+            if Original.Rotation then
+                Root.CFrame =
+                    CFrame.new(Root.Position)
+                    * Original.Rotation
+            end
+
+            if Original.Anchored ~= nil then
+                Root.Anchored = Original.Anchored
+            end
+        end
+
+        if Humanoid and Humanoid.Parent then
+            Humanoid.AutoRotate = Original.AutoRotate
+            Humanoid.PlatformStand = Original.PlatformStand
+        end
+
+        if Animate and Animate.Parent
+            and Original.AnimateDisabled ~= nil then
+            Animate.Disabled = Original.AnimateDisabled
+        end
+    end
+
+    Flying = false
+    table.clear(Original)
+end
+
+-- ====================================
+-- INICIAR VOO
+-- ====================================
+
+local function startFlight()
+    if Flying or not validCharacter() then
+        return
+    end
+
+    Original.Rotation = Root.CFrame - Root.Position
+    Original.AutoRotate = Humanoid.AutoRotate
+    Original.PlatformStand = Humanoid.PlatformStand
+    Original.Anchored = Root.Anchored
+
+    if Animate then
+        Original.AnimateDisabled = Animate.Disabled
+        Animate.Disabled = true
+    end
+
+    Humanoid.AutoRotate = false
+    Humanoid.PlatformStand = false
+    Root.Anchored = false
+
+    stopAnimations()
+
+    Attachment = Instance.new("Attachment")
+    Attachment.Name = "ZYON_V76_Attachment"
+    Attachment.Parent = Root
+
+    Velocity = Instance.new("LinearVelocity")
+    Velocity.Name = "ZYON_V76_Flight"
+    Velocity.Attachment0 = Attachment
+    Velocity.RelativeTo = Enum.ActuatorRelativeTo.World
+    Velocity.VelocityConstraintMode =
+        Enum.VelocityConstraintMode.Vector
+    Velocity.VectorVelocity = Vector3.zero
+    Velocity.ForceLimitsEnabled = false
+    Velocity.MaxForce = math.huge
+    Velocity.Parent = Root
+
+    Flying = true
+    noclip()
+end
+
+-- ====================================
+-- MANTER DEITADO
+-- ====================================
+
+local function holdPose()
+    if not Flying or not validCharacter() then
+        return
+    end
+
+    local rotation = lieRotation()
+
+    if rotation then
+        Root.CFrame =
+            CFrame.new(Root.Position) * rotation
+    end
+
+    Root.AssemblyLinearVelocity = Vector3.zero
+    Root.AssemblyAngularVelocity = Vector3.zero
+
+    if Velocity then
+        Velocity.VectorVelocity = Vector3.zero
+    end
+
+    noclip()
+    stopAnimations()
+end
+
+-- ====================================
+-- MOVIMENTO
+-- ====================================
+
+local function moveTo(position, dt)
+    if not validCharacter() then
+        return false
+    end
+
+    local delta = position - Root.Position
+    local distance = delta.Magnitude
+
+    if distance <= 0.15 then
+        holdPose()
+        return true
+    end
+
+    local step = math.min(Config.Speed * dt, distance)
+    local nextPosition = Root.Position + delta.Unit * step
+
+    local rotation = lieRotation()
+
+    if rotation then
+        Root.CFrame =
+            CFrame.new(nextPosition) * rotation
+    end
+
+    Root.AssemblyLinearVelocity = Vector3.zero
+    Root.AssemblyAngularVelocity = Vector3.zero
+
+    return false
+end
+
+-- ====================================
+-- MOEDAS
+-- ====================================
+
+local function coinPosition(coin)
+    if not coin then return nil end
+
+    if coin:IsA("BasePart") then
+        return coin.Position
+    end
+
+    if coin:IsA("Model") then
+        return coin:GetPivot().Position
+    end
+
+    return nil
+end
+
+local function isEligibleCoin(object)
+    if not Config.FarmEvento then return false end
+    if not object:IsA("BasePart") or object.Name ~= "Coin_Server" then
+        return false
+    end
+    -- CoinContainer pode estar dentro de qualquer mapa.
+    local parent = object.Parent
+    while parent and parent ~= workspace do
+        if parent.Name == "CoinContainer" then return true end
+        parent = parent.Parent
+    end
+    return false
+end
+
+local function refreshCoins()
+    table.clear(Coins)
+    for _, object in ipairs(workspace:GetDescendants()) do
+        if isEligibleCoin(object) then
+            table.insert(Coins, object)
+        end
+    end
+end
+
+local function nearestCoin()
+    if not validCharacter() then
+        return nil
+    end
+
+    local nearest
+    local nearestDistance = math.huge
+
+    for _, coin in ipairs(Coins) do
+        if coin:IsDescendantOf(workspace)
+            and not Ignored[coin] then
+
+            local position = coinPosition(coin)
+
+            if position then
+                local distance =
+                    (position - Root.Position).Magnitude
+
+                if distance < nearestDistance then
+                    nearestDistance = distance
+                    nearest = coin
+                end
+            end
+        end
+    end
+
+    return nearest
+end
+
+-- ====================================
+-- POSIÇÃO ABAIXO DA MOEDA
+-- ====================================
+
+local function getApproachPosition(coin)
+    local position = coinPosition(coin)
+
+    if not position then
+        return nil
+    end
+
+    -- Distância padrão: 1.5 studs
+    return position - Vector3.new(
+        0,
+        Config.Distance,
+        0
+    )
+end
+
+-- ====================================
+-- DESCIDA INICIAL
+-- ====================================
+
+local function findInitialDropPosition()
+    if not validCharacter() then
+        return nil
+    end
+
+    local origin = Root.Position
+
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = {Character}
+    params.IgnoreWater = true
+
+    local result = workspace:Raycast(
+        origin,
+        Vector3.new(0, -100, 0),
+        params
+    )
+
+    if not result then
+        return nil
+    end
+
+    local desiredY =
+        result.Position.Y - Config.InitialDrop
+
+    local totalDescent = origin.Y - desiredY
+
+    if totalDescent < 0
+        or totalDescent > Config.MaxInitialDescent then
+        return nil
+    end
+
+    return Vector3.new(
+        origin.X,
+        desiredY,
+        origin.Z
+    )
+end
+
+local function resetInitialDrop()
+    NeedsInitialDrop = true
+    InitialDropTarget = nil
+    InitialDropAttempted = false
+    DropStatus = "Pendente"
+end
+
+-- ====================================
+-- PARAR FARM / PARTIDA
+-- ====================================
+
+local function resetFarm()
+    resetTarget()
+    stopFlight()
+end
+
+local function resetRound()
+    RoundActive = false
+    BagFull = false
+
+    table.clear(Ignored)
+
+    resetInitialDrop()
+    resetFarm()
+end
+
+-- ====================================
+-- DETECÇÃO DE PARTIDA
+-- ====================================
+
+local function findRoleSelector()
+    local main = PlayerGui:FindFirstChild("MainGUI")
+    local gameGui = main and main:FindFirstChild("Game")
+    local selector =
+        gameGui and gameGui:FindFirstChild("RoleSelector")
+
+    if selector and selector:IsA("GuiObject") then
+        return selector
+    end
+
+    return nil
+end
+
+local function bindRole()
+    local selector = findRoleSelector()
+
+    if selector == RoleSelector then
+        return
+    end
+
+    if RoleConnection then
+        RoleConnection:Disconnect()
+        RoleConnection = nil
+    end
+
+    RoleSelector = selector
+
+    if not selector then
+        LastRoleVisible = false
+        return
+    end
+
+    LastRoleVisible = selector.Visible
+
+    RoleConnection =
+        selector:GetPropertyChangedSignal("Visible")
+        :Connect(function()
+            if not Running then return end
+
+            local visible = selector.Visible
+            local previous = LastRoleVisible
+
+            LastRoleVisible = visible
+
+            if visible and not previous then
+                RoundActive = true
+                BagFull = false
+                ResetRequested = false
+
+                table.clear(Ignored)
+                resetTarget()
+                resetInitialDrop()
+            end
+        end)
+end
+
+-- ====================================
+-- DETECTAR BOLSA CHEIA
+-- ====================================
+
+local function isVisible(object)
+    local current = object
+
+    while current and current ~= PlayerGui do
+        if current:IsA("GuiObject")
+            and not current.Visible then
+            return false
+        end
+
+        if current:IsA("ScreenGui")
+            and not current.Enabled then
+            return false
+        end
+
+        current = current.Parent
+    end
+
+    return current == PlayerGui
+end
+
+local function checkBag()
+    if not RoundActive or BagFull then
+        return
+    end
+
+    local main = PlayerGui:FindFirstChild("MainGUI")
+    local gameGui = main and main:FindFirstChild("Game")
+    local bags = gameGui and gameGui:FindFirstChild("CoinBags")
+
+    local notification =
+        bags and bags:FindFirstChild(
+            "FullBagNotification",
+            true
+        )
+
+    if not notification or not isVisible(notification) then
+        return
+    end
+
+    local function hasFullText(object)
+        if object:IsA("TextLabel")
+            or object:IsA("TextButton") then
+
+            return string.find(
+                string.upper(object.Text),
+                "COIN BAG FULL!",
+                1,
+                true
+            ) ~= nil
+        end
+
+        return false
+    end
+
+    if hasFullText(notification) then
+        BagFull = true
+        return
+    end
+
+    for _, child in ipairs(notification:GetDescendants()) do
+        if hasFullText(child) then
+            BagFull = true
+            return
+        end
+    end
+end
+
+-- ====================================
+-- INTERFACE
+-- ====================================
+
+local Gui = Instance.new("ScreenGui")
+Gui.Name = "ZYON_FARM_V76"
+Gui.ResetOnSpawn = false
+Gui.IgnoreGuiInset = true
+Gui.Parent = PlayerGui
+
+local function corner(object, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius)
+    c.Parent = object
+end
+
+local Main = Instance.new("Frame")
+Main.Size = UDim2.fromOffset(440, 470)
+Main.Position = UDim2.new(0.5, -220, 0.5, -235)
+Main.BackgroundColor3 = Color3.fromRGB(20, 16, 30)
+Main.BorderSizePixel = 0
+Main.Parent = Gui
+corner(Main, 12)
+
+local Top = Instance.new("Frame")
+Top.Size = UDim2.new(1, 0, 0, 48)
+Top.BackgroundColor3 = Color3.fromRGB(60, 30, 100)
+Top.BorderSizePixel = 0
+Top.Parent = Main
+corner(Top, 12)
+
+local function label(parent, text, y, size)
+    local item = Instance.new("TextLabel")
+    item.Position = UDim2.fromOffset(16, y)
+    item.Size = UDim2.new(1, -32, 0, 25)
+    item.BackgroundTransparency = 1
+    item.TextColor3 = Color3.fromRGB(235, 225, 255)
+    item.Font = Enum.Font.Gotham
+    item.TextSize = size or 14
+    item.TextXAlignment = Enum.TextXAlignment.Left
+    item.Text = text
+    item.Parent = parent
+    return item
+end
+
+local Title =
+    label(Top, "ZYON | FARM v7.7", 11, 16)
+Title.Font = Enum.Font.GothamBold
+
+local Close = Instance.new("TextButton")
+Close.Size = UDim2.fromOffset(34, 32)
+Close.Position = UDim2.new(1, -43, 0, 8)
+Close.BackgroundColor3 = Color3.fromRGB(150, 45, 80)
+Close.TextColor3 = Color3.new(1, 1, 1)
+Close.Font = Enum.Font.GothamBold
+Close.TextSize = 16
+Close.Text = "X"
+Close.Parent = Top
+corner(Close, 8)
+
+local Toggle = Instance.new("TextButton")
+Toggle.Size = UDim2.new(1, -32, 0, 42)
+Toggle.Position = UDim2.fromOffset(16, 64)
+Toggle.BackgroundColor3 = Color3.fromRGB(105, 50, 170)
+Toggle.TextColor3 = Color3.new(1, 1, 1)
+Toggle.Font = Enum.Font.GothamBold
+Toggle.TextSize = 15
+Toggle.Text = "AUTO FARM: DESATIVADO"
+Toggle.Parent = Main
+corner(Toggle, 8)
+
+local SpeedLabel =
+    label(Main, "Velocidade: 20", 126)
+
+local DistanceLabel =
+    label(Main, "Altura abaixo da moeda: 1.5 studs", 166)
+
+local function button(text, x, y)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.fromOffset(42, 30)
+    b.Position = UDim2.fromOffset(x, y)
+    b.BackgroundColor3 = Color3.fromRGB(80, 40, 120)
+    b.TextColor3 = Color3.new(1, 1, 1)
+    b.Font = Enum.Font.GothamBold
+    b.TextSize = 20
+    b.Text = text
+    b.Parent = Main
+    corner(b, 7)
+    return b
+end
+
+local SpeedMinus = button("-", 300, 122)
+local SpeedPlus = button("+", 355, 122)
+
+local DistanceMinus = button("-", 300, 162)
+local DistancePlus = button("+", 355, 162)
+
+-- ====================================
+-- NOVO BOTÃO: RESET AO ENCHER
+-- ====================================
+
+local ResetLabel =
+    label(Main, "Resetar ao encher o saco", 210)
+
+local ResetToggle = Instance.new("TextButton")
+ResetToggle.Size = UDim2.fromOffset(96, 32)
+ResetToggle.Position = UDim2.fromOffset(300, 205)
+ResetToggle.BackgroundColor3 = Color3.fromRGB(75, 65, 85)
+ResetToggle.TextColor3 = Color3.new(1, 1, 1)
+ResetToggle.Font = Enum.Font.GothamBold
+ResetToggle.TextSize = 14
+ResetToggle.Text = "OFF"
+ResetToggle.Parent = Main
+corner(ResetToggle, 8)
+
+local EventLabel = label(Main, "Farm de Evento", 252)
+local EventToggle = Instance.new("TextButton")
+EventToggle.Size = UDim2.fromOffset(96, 32)
+EventToggle.Position = UDim2.fromOffset(300, 247)
+EventToggle.BackgroundColor3 = Color3.fromRGB(75, 65, 85)
+EventToggle.TextColor3 = Color3.new(1, 1, 1)
+EventToggle.Font = Enum.Font.GothamBold
+EventToggle.TextSize = 14
+EventToggle.Text = "OFF"
+EventToggle.Parent = Main
+corner(EventToggle, 8)
+
+local RoundLabel =
+    label(Main, "Partida: Aguardando...", 303)
+
+local BagLabel =
+    label(Main, "Bolsa: Aguardando...", 333)
+
+local FarmLabel =
+    label(Main, "Farm: Desativado", 363)
+
+local DropLabel =
+    label(Main, "Descida inicial: Aguardando", 393)
+
+local Hint =
+    label(
+        Main,
+        "RightShift: mostrar/ocultar | X: encerrar",
+        438,
+        11
+    )
+
+Hint.TextColor3 = Color3.fromRGB(170, 150, 195)
+
+-- ====================================
+-- ENCERRAMENTO
+-- ====================================
+
+local function shutdown()
+    if not Running then return end
+
+    Running = false
+    Enabled = false
+
+    resetFarm()
+
+    if RoleConnection then
+        RoleConnection:Disconnect()
+        RoleConnection = nil
+    end
+
+    disconnect(CharacterConnections)
+    disconnect(Connections)
+
+    Gui:Destroy()
+
+    if shared[KEY] == shutdown then
+        shared[KEY] = nil
+    end
+
+    print("[ZYON] Farm v7.6 encerrada.")
+end
+
+shared[KEY] = shutdown
+
+connect(Close.MouseButton1Click, shutdown)
+
+connect(Toggle.MouseButton1Click, function()
+    Enabled = not Enabled
+
+    Toggle.Text = Enabled
+        and "AUTO FARM: ATIVADO"
+        or "AUTO FARM: DESATIVADO"
+
+    if not Enabled then
+        resetFarm()
+    elseif RoundActive then
+        resetInitialDrop()
+    end
+end)
+
+connect(ResetToggle.MouseButton1Click, function()
+    Config.ResetOnFullBag = not Config.ResetOnFullBag
+
+    ResetToggle.Text =
+        Config.ResetOnFullBag and "ON" or "OFF"
+
+    ResetToggle.BackgroundColor3 =
+        Config.ResetOnFullBag
+        and Color3.fromRGB(105, 50, 170)
+        or Color3.fromRGB(75, 65, 85)
+end)
+
+connect(EventToggle.MouseButton1Click, function()
+    Config.FarmEvento = not Config.FarmEvento
+    EventToggle.Text = Config.FarmEvento and "ON" or "OFF"
+    EventToggle.BackgroundColor3 = Config.FarmEvento
+        and Color3.fromRGB(105, 50, 170)
+        or Color3.fromRGB(75, 65, 85)
+    resetTarget()
+    table.clear(Ignored)
+    refreshCoins()
+end)
+
+connect(SpeedMinus.MouseButton1Click, function()
+    Config.Speed = math.max(10, Config.Speed - 1)
+end)
+
+connect(SpeedPlus.MouseButton1Click, function()
+    Config.Speed = math.min(30, Config.Speed + 1)
+end)
+
+connect(DistanceMinus.MouseButton1Click, function()
+    Config.Distance =
+        math.max(0.5, Config.Distance - 0.5)
+    resetTarget()
+end)
+
+connect(DistancePlus.MouseButton1Click, function()
+    Config.Distance =
+        math.min(5, Config.Distance + 0.5)
+    resetTarget()
+end)
+
+connect(UIS.InputBegan, function(input, processed)
+    if not processed
+        and input.KeyCode == Enum.KeyCode.RightShift then
+        Gui.Enabled = not Gui.Enabled
+    end
+end)
+
+-- ====================================
+-- ARRASTAR INTERFACE
+-- ====================================
+
+local Dragging = false
+local DragStart
+local StartPosition
+
+connect(Top.InputBegan, function(input)
+    if input.UserInputType ==
+        Enum.UserInputType.MouseButton1 then
+        Dragging = true
+        DragStart = input.Position
+        StartPosition = Main.Position
+    end
+end)
+
+connect(UIS.InputEnded, function(input)
+    if input.UserInputType ==
+        Enum.UserInputType.MouseButton1 then
+        Dragging = false
+    end
+end)
+
+connect(UIS.InputChanged, function(input)
+    if Dragging
+        and input.UserInputType ==
+            Enum.UserInputType.MouseMovement then
+
+        local delta = input.Position - DragStart
+
+        Main.Position = UDim2.new(
+            StartPosition.X.Scale,
+            StartPosition.X.Offset + delta.X,
+            StartPosition.Y.Scale,
+            StartPosition.Y.Offset + delta.Y
+        )
+    end
+end)
+
+-- ====================================
+-- PERSONAGEM
+-- ====================================
+
+local function bindCharacter(character)
+    resetRound()
+    disconnect(CharacterConnections)
+
+    Character = character
+    Humanoid = character:WaitForChild("Humanoid")
+    Root = character:WaitForChild("HumanoidRootPart")
+    Animate = character:FindFirstChild("Animate")
+
+    if not Running then return end
+
+    connect(
+        Humanoid.Died,
+        resetRound,
+        CharacterConnections
+    )
+end
+
+connect(Player.CharacterAdded, function(character)
+    task.spawn(bindCharacter, character)
+end)
+
+connect(Player.CharacterRemoving, resetRound)
+
+if Player.Character then
+    task.spawn(bindCharacter, Player.Character)
+end
+
+connect(PlayerGui.DescendantAdded, function(object)
+    if object.Name == "RoleSelector" then
+        task.defer(bindRole)
+    end
+end)
+
+bindRole()
+
+-- ====================================
+-- ATUALIZAÇÃO DA INTERFACE
+-- ====================================
+
+task.spawn(function()
+    while Running do
+        refreshCoins()
+        bindRole()
+        checkBag()
+
+        SpeedLabel.Text =
+            "Velocidade: " .. Config.Speed
+
+        DistanceLabel.Text = string.format(
+            "Altura abaixo da moeda: %.1f studs",
+            Config.Distance
+        )
+
+        RoundLabel.Text =
+            "Partida: "
+            .. (
+                RoundActive
+                and "Em partida"
+                or "Aguardando..."
+            )
+
+        BagLabel.Text =
+            "Bolsa: "
+            .. (
+                BagFull
+                and "Saco Cheio!"
+                or (
+                    RoundActive
+                    and "Coletando..."
+                    or "Aguardando..."
+                )
+            )
+
+        FarmLabel.Text = "Farm: " .. Status
+
+        DropLabel.Text =
+            "Descida inicial: " .. DropStatus
+
+        task.wait(Config.ScanInterval)
+    end
+end)
+
+-- ====================================
+-- FARM PRINCIPAL
+-- ====================================
+
+connect(RunService.Heartbeat, function(dt)
+    if not Running then return end
+
+    -- NOVO: RESET AUTOMÁTICO AO ENCHER
+    if Enabled
+        and RoundActive
+        and BagFull
+        and Config.ResetOnFullBag
+        and not ResetRequested
+        and validCharacter() then
+
+        ResetRequested = true
+        Status = "Resetando: saco cheio"
+
+        resetFarm()
+
+        -- Solicita o reset uma única vez.
+        Humanoid.Health = 0
+
+        return
+    end
+
+    if not Enabled
+        or not RoundActive
+        or BagFull
+        or not validCharacter() then
+
+        if Flying then
+            resetFarm()
+        end
+
+        Status = not Enabled
+            and "Desativado"
+            or (
+                BagFull
+                and "Saco cheio"
+                or "Aguardando partida"
+            )
+
+        return
+    end
+
+    if not Flying then
+        startFlight()
+    end
+
+    holdPose()
+
+    -- ====================================
+    -- DESCIDA INICIAL
+    -- ====================================
+
+    if NeedsInitialDrop then
+        if not InitialDropAttempted then
+            InitialDropAttempted = true
+            InitialDropTarget =
+                findInitialDropPosition()
+        end
+
+        if InitialDropTarget then
+            Status = "Descendo abaixo do piso..."
+            DropStatus = "Descendo..."
+
+            local reached = moveTo(
+                InitialDropTarget,
+                math.min(dt, 0.1)
+            )
+
+            if reached then
+                NeedsInitialDrop = false
+                InitialDropTarget = nil
+                DropStatus = "Concluída"
+                Status = "Procurando moedas..."
+            end
+
+            return
+        else
+            NeedsInitialDrop = false
+            DropStatus = "Ignorada"
+            Status = "Piso não detectado"
+            return
+        end
+    end
+
+    -- ====================================
+    -- FARM DE MOEDAS
+    -- ====================================
+
+    if not Target then
+        Target = nearestCoin()
+
+        if Target then
+            TargetPosition = getApproachPosition(Target)
+            ReachedAt = nil
+        else
+            Status = "Procurando moedas..."
+            return
+        end
+    end
+
+    if not Target:IsDescendantOf(workspace) then
+        resetTarget()
+        return
+    end
+
+    if not TargetPosition then
+        resetTarget()
+        return
+    end
+
+    if not ReachedAt then
+        Status = "Indo para baixo da moeda..."
+
+        local reached = moveTo(
+            TargetPosition,
+            math.min(dt, 0.1)
+        )
+
+        if reached then
+            ReachedAt = os.clock()
+            Status = "Testando coleta por baixo..."
+        end
+    else
+        Status = "Testando coleta por baixo..."
+        holdPose()
+
+        if os.clock() - ReachedAt
+            >= Config.WaitTime then
+
+            -- Visitada não significa coletada.
+            Ignored[Target] = true
+            resetTarget()
+        end
+    end
+end)
+
+print("[ZYON] Farm v7.7 carregada!")
+print("[ZYON] Distância padrão: 1.5 studs")
+print("[ZYON] Reset ao encher o saco: OFF")
+print("[ZYON] Farm de Evento: OFF (Coin_Server / CoinContainer)")
