@@ -2,7 +2,7 @@
     ZYON FARM v7.7 COIN_SERVER TEST
 
     NOVO:
-    - Farm de Evento ON/OFF (padrao OFF)
+    - Farm de Evento ON/OFF (padrao ON)
     - Reconhecimento de Coin_Server (BasePart) dentro de CoinContainer
     - Resetar ao encher o saco: ON/OFF
     - Padrão: OFF
@@ -48,7 +48,7 @@ local Config = {
 
     -- NOVA OPÇÃO
     ResetOnFullBag = false,
-    FarmEvento = false -- independente, padrao OFF
+    FarmEvento = true -- independente, padrao ON
 }
 
 local Character
@@ -785,11 +785,11 @@ local EventLabel = label(Main, "Farm de Evento", 252)
 local EventToggle = Instance.new("TextButton")
 EventToggle.Size = UDim2.fromOffset(96, 32)
 EventToggle.Position = UDim2.fromOffset(300, 247)
-EventToggle.BackgroundColor3 = Color3.fromRGB(43, 40, 56)
+EventToggle.BackgroundColor3 = Config.FarmEvento and Color3.fromRGB(107, 62, 181) or Color3.fromRGB(43, 40, 56)
 EventToggle.TextColor3 = Color3.new(1, 1, 1)
 EventToggle.Font = Enum.Font.GothamBold
 EventToggle.TextSize = 14
-EventToggle.Text = "OFF"
+EventToggle.Text = Config.FarmEvento and "ON" or "OFF"
 EventToggle.Parent = Main
 corner(EventToggle, 8)
 
@@ -951,7 +951,6 @@ Scroll.Position = UDim2.fromOffset(0, 48)
 Scroll.Size = UDim2.new(1, 0, 1, -66)
 Scroll.BackgroundTransparency = 1
 Scroll.BorderSizePixel = 0
-Scroll.ScrollBarThickness = 4
 Scroll.ScrollBarThickness = 12
 Scroll.ScrollBarImageColor3 = Stroke.Color
 Scroll.ScrollingDirection = Enum.ScrollingDirection.Y
@@ -1040,7 +1039,6 @@ Minimize.BackgroundColor3 = Color3.fromRGB(42, 35, 59)
 Close.TextColor3 = Color3.fromRGB(255, 160, 184)
 Scroll.Position = UDim2.fromOffset(0, 72)
 Scroll.Size = UDim2.new(1, 0, 1, -96)
-Scroll.ScrollBarThickness = 3
 Scroll.ScrollBarThickness = 12
 Content.Size = UDim2.fromOffset(440, 574)
 local function card(y, height, heading, subtitle)
@@ -1544,4 +1542,4 @@ end)
 print("[ZYON] Farm v7.7 carregada!")
 print("[ZYON] Distância padrão: 1.5 studs")
 print("[ZYON] Reset ao encher o saco: OFF")
-print("[ZYON] Farm de Evento: OFF (Coin_Server / CoinContainer)")
+print("[ZYON] Farm de Evento: ON (Coin_Server / CoinContainer)")
