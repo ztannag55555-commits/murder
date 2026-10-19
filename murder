@@ -100,6 +100,22 @@ local function connect(signal, callback, list)
     return connection
 end
 
+-- Automatic anti-idle. The connection is included in normal shutdown cleanup.
+-- VirtualUser support depends on the environment running this LocalScript.
+local AntiAFKWarned = false
+connect(Player.Idled, function()
+    if not Running then return end
+    local ok, err = pcall(function()
+        local virtualUser = game:GetService("VirtualUser")
+        local camera = workspace.CurrentCamera
+        virtualUser:CaptureController()
+        virtualUser:ClickButton2(Vector2.new(0, 0), camera and camera.CFrame or CFrame.new())
+    end)
+    if not ok and not AntiAFKWarned then
+        AntiAFKWarned = true
+        warn("[ZYON] Anti-AFK indisponivel neste ambiente: " .. tostring(err))
+    end
+end)
 local function disconnect(list)
     for _, connection in ipairs(list) do
         pcall(function()
@@ -834,9 +850,9 @@ end
 
 shared[KEY] = shutdown
 
-connect(Close.MouseButton1Click, shutdown)
+connect(Close.Activated, shutdown)
 
-connect(Toggle.MouseButton1Click, function()
+connect(Toggle.Activated, function()
     Enabled = not Enabled
 
     Toggle.Text = Enabled
@@ -850,7 +866,7 @@ connect(Toggle.MouseButton1Click, function()
     end
 end)
 
-connect(ResetToggle.MouseButton1Click, function()
+connect(ResetToggle.Activated, function()
     Config.ResetOnFullBag = not Config.ResetOnFullBag
 
     ResetToggle.Text =
@@ -862,7 +878,7 @@ connect(ResetToggle.MouseButton1Click, function()
         or Color3.fromRGB(43, 40, 56)
 end)
 
-connect(EventToggle.MouseButton1Click, function()
+connect(EventToggle.Activated, function()
     Config.FarmEvento = not Config.FarmEvento
     EventToggle.Text = Config.FarmEvento and "ON" or "OFF"
     EventToggle.BackgroundColor3 = Config.FarmEvento
@@ -873,21 +889,21 @@ connect(EventToggle.MouseButton1Click, function()
     refreshCoins()
 end)
 
-connect(SpeedMinus.MouseButton1Click, function()
+connect(SpeedMinus.Activated, function()
     Config.Speed = math.max(10, Config.Speed - 1)
 end)
 
-connect(SpeedPlus.MouseButton1Click, function()
+connect(SpeedPlus.Activated, function()
     Config.Speed = math.min(30, Config.Speed + 1)
 end)
 
-connect(DistanceMinus.MouseButton1Click, function()
+connect(DistanceMinus.Activated, function()
     Config.Distance =
         math.max(0.5, Config.Distance - 0.5)
     resetTarget()
 end)
 
-connect(DistancePlus.MouseButton1Click, function()
+connect(DistancePlus.Activated, function()
     Config.Distance =
         math.min(5, Config.Distance + 0.5)
     resetTarget()
@@ -936,6 +952,7 @@ Scroll.Size = UDim2.new(1, 0, 1, -66)
 Scroll.BackgroundTransparency = 1
 Scroll.BorderSizePixel = 0
 Scroll.ScrollBarThickness = 4
+Scroll.ScrollBarThickness = 12
 Scroll.ScrollBarImageColor3 = Stroke.Color
 Scroll.ScrollingDirection = Enum.ScrollingDirection.Y
 Scroll.Parent = Main
@@ -1024,6 +1041,7 @@ Close.TextColor3 = Color3.fromRGB(255, 160, 184)
 Scroll.Position = UDim2.fromOffset(0, 72)
 Scroll.Size = UDim2.new(1, 0, 1, -96)
 Scroll.ScrollBarThickness = 3
+Scroll.ScrollBarThickness = 12
 Content.Size = UDim2.fromOffset(440, 574)
 local function card(y, height, heading, subtitle)
     local c = Instance.new("Frame")
@@ -1113,6 +1131,18 @@ for _, b in ipairs({SpeedMinus, SpeedPlus, DistanceMinus, DistancePlus}) do
     b.BackgroundColor3 = Color3.fromRGB(41, 34, 58)
     b.TextColor3 = Theme.Text
     b.TextSize = 18
+end
+-- Touch scrolling is handled by Roblox's ScrollingFrame, including inertia
+-- and gesture cancellation on buttons. Only the title bar moves the window.
+Scroll.Active = true
+Scroll.ScrollingEnabled = true
+Scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+Scroll.ElasticBehavior = Enum.ElasticBehavior.WhenScrollable
+Content.Active = false
+for _, object in ipairs(Content:GetDescendants()) do
+    if object:IsA("Frame") or object:IsA("TextLabel") then
+        object.Active = false
+    end
 end
 local Gesture
 local RequestedSize = Vector2.new(300, 180)
