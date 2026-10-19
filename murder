@@ -87,6 +87,8 @@ local DropStatus = "Aguardando"
 
 local Connections = {}
 local CharacterConnections = {}
+local BodyParts, CoinCandidates = {}, {}
+local NextAnimationCheck, NextCollisionCheck, NextCoinSearch = 0, 0, 0
 
 -- ====================================
 -- CONEXÕES
@@ -111,8 +113,9 @@ local function validCharacter()
     return Character
         and Character.Parent
         and Root
-        and Root.Parent
+        and Root.Parent == Character
         and Humanoid
+        and Humanoid.Parent == Character
         and Humanoid.Health > 0
         and Player.Character == Character
 end
@@ -129,6 +132,9 @@ end
 
 local function stopAnimations()
     if not Humanoid then return end
+    local now = os.clock()
+    if now < NextAnimationCheck then return end
+    NextAnimationCheck = now + 0.25
 
     local animator = Humanoid:FindFirstChildOfClass("Animator")
 
@@ -147,18 +153,18 @@ end
 
 local function noclip()
     if not Character then return end
-
-    for _, object in ipairs(Character:GetDescendants()) do
-        if object:IsA("BasePart") then
-            if Collisions[object] == nil then
-                Collisions[object] = object.CanCollide
-            end
-
-            object.CanCollide = false
+    local now = os.clock()
+    if now < NextCollisionCheck then return end
+    NextCollisionCheck = now + 0.1
+    for object in pairs(BodyParts) do
+        if object:IsDescendantOf(Character) then
+            if Collisions[object] == nil then Collisions[object] = object.CanCollide end
+            if object.CanCollide then object.CanCollide = false end
+        else
+            BodyParts[object] = nil
         end
     end
 end
-
 local function restoreCollisions()
     for part, original in pairs(Collisions) do
         if part and part.Parent then
@@ -271,6 +277,7 @@ local function startFlight()
     Velocity.Parent = Root
 
     Flying = true
+    NextAnimationCheck, NextCollisionCheck = 0, 0
     noclip()
 end
 
@@ -366,15 +373,35 @@ local function isEligibleCoin(object)
     return false
 end
 
+-- One initial scan; subsequent updates inspect only cached coin candidates.
+local function indexCoin(object)
+    if object:IsA("BasePart") and object.Name == "Coin_Server" then
+        CoinCandidates[object] = true
+    end
+end
+connect(workspace.DescendantAdded, indexCoin)
+connect(workspace.DescendantRemoving, function(object)
+    CoinCandidates[object], Ignored[object] = nil, nil
+end)
+task.defer(function()
+    if not Running then return end
+    local initial = workspace:GetDescendants()
+    for i, object in ipairs(initial) do
+        if not Running then return end
+        if object:IsDescendantOf(workspace) then indexCoin(object) end
+        if i % 256 == 0 then task.wait() end
+    end
+    table.clear(initial)
+end)
 local function refreshCoins()
     table.clear(Coins)
-    for _, object in ipairs(workspace:GetDescendants()) do
-        if isEligibleCoin(object) then
+    if not Enabled or not Config.FarmEvento then return end
+    for object in pairs(CoinCandidates) do
+        if object:IsDescendantOf(workspace) and isEligibleCoin(object) then
             table.insert(Coins, object)
         end
     end
 end
-
 local function nearestCoin()
     if not validCharacter() then
         return nil
@@ -640,8 +667,8 @@ local function corner(object, radius)
 end
 
 local Main = Instance.new("Frame")
-Main.Size = UDim2.fromOffset(440, 470)
-Main.Position = UDim2.new(0.5, -220, 0.5, -235)
+Main.Size = UDim2.fromOffset(300, 180)
+Main.Position = UDim2.new(0.5, -150, 0.5, -90)
 Main.BackgroundColor3 = Color3.fromRGB(20, 16, 30)
 Main.BorderSizePixel = 0
 Main.Parent = Gui
@@ -686,7 +713,7 @@ corner(Close, 8)
 local Toggle = Instance.new("TextButton")
 Toggle.Size = UDim2.new(1, -32, 0, 42)
 Toggle.Position = UDim2.fromOffset(16, 64)
-Toggle.BackgroundColor3 = Color3.fromRGB(105, 50, 170)
+Toggle.BackgroundColor3 = Color3.fromRGB(107, 62, 181)
 Toggle.TextColor3 = Color3.new(1, 1, 1)
 Toggle.Font = Enum.Font.GothamBold
 Toggle.TextSize = 15
@@ -730,7 +757,7 @@ local ResetLabel =
 local ResetToggle = Instance.new("TextButton")
 ResetToggle.Size = UDim2.fromOffset(96, 32)
 ResetToggle.Position = UDim2.fromOffset(300, 205)
-ResetToggle.BackgroundColor3 = Color3.fromRGB(75, 65, 85)
+ResetToggle.BackgroundColor3 = Color3.fromRGB(43, 40, 56)
 ResetToggle.TextColor3 = Color3.new(1, 1, 1)
 ResetToggle.Font = Enum.Font.GothamBold
 ResetToggle.TextSize = 14
@@ -742,7 +769,7 @@ local EventLabel = label(Main, "Farm de Evento", 252)
 local EventToggle = Instance.new("TextButton")
 EventToggle.Size = UDim2.fromOffset(96, 32)
 EventToggle.Position = UDim2.fromOffset(300, 247)
-EventToggle.BackgroundColor3 = Color3.fromRGB(75, 65, 85)
+EventToggle.BackgroundColor3 = Color3.fromRGB(43, 40, 56)
 EventToggle.TextColor3 = Color3.new(1, 1, 1)
 EventToggle.Font = Enum.Font.GothamBold
 EventToggle.TextSize = 14
@@ -791,6 +818,10 @@ local function shutdown()
 
     disconnect(CharacterConnections)
     disconnect(Connections)
+    table.clear(BodyParts)
+    table.clear(CoinCandidates)
+    table.clear(Coins)
+    table.clear(Ignored)
 
     Gui:Destroy()
 
@@ -827,16 +858,16 @@ connect(ResetToggle.MouseButton1Click, function()
 
     ResetToggle.BackgroundColor3 =
         Config.ResetOnFullBag
-        and Color3.fromRGB(105, 50, 170)
-        or Color3.fromRGB(75, 65, 85)
+        and Color3.fromRGB(107, 62, 181)
+        or Color3.fromRGB(43, 40, 56)
 end)
 
 connect(EventToggle.MouseButton1Click, function()
     Config.FarmEvento = not Config.FarmEvento
     EventToggle.Text = Config.FarmEvento and "ON" or "OFF"
     EventToggle.BackgroundColor3 = Config.FarmEvento
-        and Color3.fromRGB(105, 50, 170)
-        or Color3.fromRGB(75, 65, 85)
+        and Color3.fromRGB(107, 62, 181)
+        or Color3.fromRGB(43, 40, 56)
     resetTarget()
     table.clear(Ignored)
     refreshCoins()
@@ -862,85 +893,424 @@ connect(DistancePlus.MouseButton1Click, function()
     resetTarget()
 end)
 
+-- Window controls use only GUI position/size; farm execution remains independent.
+local GuiService = game:GetService("GuiService")
+Gui.IgnoreGuiInset = false
+Main.Name = "Main"
+Main.Active = true
+Top.Active = true
+Title.Size = UDim2.new(1, -110, 0, 25)
+Title.TextTruncate = Enum.TextTruncate.AtEnd
+
+local Minimize = Close:Clone()
+Minimize.Name = "Minimize"
+Minimize.Text = "—"
+Minimize.Position = UDim2.new(1, -83, 0, 8)
+Minimize.BackgroundColor3 = Color3.fromRGB(80, 40, 120)
+Minimize.Parent = Top
+
+local Floating = Instance.new("TextButton")
+Floating.Name = "ZYONReopen"
+Floating.Size = UDim2.fromOffset(78, 36)
+Floating.Position = UDim2.new(0.5, -39, 0.5, -18)
+Floating.BackgroundColor3 = Color3.fromRGB(20, 16, 30)
+Floating.TextColor3 = Color3.fromRGB(185, 125, 255)
+Floating.Font = Enum.Font.GothamBold
+Floating.TextSize = 14
+Floating.Text = "ZYON"
+Floating.BorderSizePixel = 0
+Floating.Visible = false
+Floating.ZIndex = 20
+Floating.Parent = Gui
+corner(Floating, 10)
+local Stroke = Instance.new("UIStroke")
+Stroke.Color = Color3.fromRGB(145, 80, 235)
+Stroke.Thickness = 2
+Stroke.Parent = Floating
+
+-- The controls scroll when the window is made shorter.
+local Scroll = Instance.new("ScrollingFrame")
+Scroll.Name = "WindowContent"
+Scroll.Position = UDim2.fromOffset(0, 48)
+Scroll.Size = UDim2.new(1, 0, 1, -66)
+Scroll.BackgroundTransparency = 1
+Scroll.BorderSizePixel = 0
+Scroll.ScrollBarThickness = 4
+Scroll.ScrollBarImageColor3 = Stroke.Color
+Scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+Scroll.Parent = Main
+local Content = Instance.new("Frame")
+Content.Size = UDim2.fromOffset(440, 422)
+Content.BackgroundTransparency = 1
+Content.Parent = Scroll
+local ContentScale = Instance.new("UIScale")
+ContentScale.Parent = Content
+for _, child in ipairs(Main:GetChildren()) do
+    if child:IsA("GuiObject") and child ~= Top and child ~= Scroll then
+        child.Position = UDim2.new(child.Position.X.Scale, child.Position.X.Offset,
+            child.Position.Y.Scale, child.Position.Y.Offset - 48)
+        child.Parent = Content
+    end
+end
+Hint.Text = "— recolher | RightShift abrir/fechar | X encerrar"
+local Resize = Instance.new("TextButton")
+Resize.Name = "ResizeHandle"
+Resize.AnchorPoint = Vector2.new(1, 1)
+Resize.Position = UDim2.fromScale(1, 1)
+Resize.Size = UDim2.fromOffset(26, 24)
+Resize.BackgroundTransparency = 1
+Resize.Text = "◢"
+Resize.TextColor3 = Stroke.Color
+Resize.TextSize = 22
+Resize.ZIndex = 10
+Resize.Parent = Main
+
+-- Visual theme: dark surfaces, violet accents and clear control groups.
+local Theme = {
+    Background = Color3.fromRGB(12, 13, 20),
+    Surface = Color3.fromRGB(21, 22, 34),
+    Border = Color3.fromRGB(48, 43, 67),
+    Accent = Color3.fromRGB(157, 104, 255),
+    Text = Color3.fromRGB(239, 235, 250),
+    Muted = Color3.fromRGB(151, 149, 173),
+}
+local function outline(object, color, transparency)
+    local line = Instance.new("UIStroke")
+    line.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    line.Color = color or Theme.Border
+    line.Transparency = transparency or 0
+    line.Thickness = 1
+    line.Parent = object
+    return line
+end
+local function round(object, radius)
+    local c = object:FindFirstChildOfClass("UICorner")
+    if c then c.CornerRadius = UDim.new(0, radius) else corner(object, radius) end
+end
+local function caption(parent, value, x, y, width, size, color)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Position = UDim2.fromOffset(x, y)
+    l.Size = UDim2.fromOffset(width, 22)
+    l.Text = value
+    l.TextSize = size or 12
+    l.TextColor3 = color or Theme.Muted
+    l.Font = Enum.Font.GothamMedium
+    l.TextXAlignment = Enum.TextXAlignment.Left
+    l.Parent = parent
+    return l
+end
+Main.BackgroundColor3 = Theme.Background
+round(Main, 16)
+outline(Main, Theme.Accent, 0.55)
+Top.Size = UDim2.new(1, 0, 0, 64)
+Top.BackgroundColor3 = Color3.fromRGB(26, 22, 41)
+round(Top, 16)
+local HeaderGradient = Instance.new("UIGradient")
+HeaderGradient.Color = ColorSequence.new(Color3.fromRGB(45, 28, 69), Color3.fromRGB(20, 20, 31))
+HeaderGradient.Rotation = 15
+HeaderGradient.Parent = Top
+Title.Text = "ZYON"
+Title.Position = UDim2.fromOffset(22, 10)
+Title.TextSize = 22
+Title.TextColor3 = Theme.Text
+Title.Size = UDim2.new(1, -120, 0, 27)
+caption(Top, "FARM  /  CONTROL CENTER", 23, 35, 230, 10, Theme.Accent)
+Close.Position = UDim2.new(1, -46, 0, 16)
+Minimize.Position = UDim2.new(1, -86, 0, 16)
+Close.BackgroundColor3 = Color3.fromRGB(61, 30, 46)
+Minimize.BackgroundColor3 = Color3.fromRGB(42, 35, 59)
+Close.TextColor3 = Color3.fromRGB(255, 160, 184)
+Scroll.Position = UDim2.fromOffset(0, 72)
+Scroll.Size = UDim2.new(1, 0, 1, -96)
+Scroll.ScrollBarThickness = 3
+Content.Size = UDim2.fromOffset(440, 574)
+local function card(y, height, heading, subtitle)
+    local c = Instance.new("Frame")
+    c.Position = UDim2.fromOffset(14, y)
+    c.Size = UDim2.fromOffset(412, height)
+    c.BackgroundColor3 = Theme.Surface
+    c.BorderSizePixel = 0
+    c.ZIndex = 1
+    c.Parent = Content
+    round(c, 12)
+    outline(c)
+    caption(c, heading, 16, 10, 370, 10, Theme.Accent)
+    if subtitle then caption(c, subtitle, 16, 32, 370, 11) end
+    return c
+end
+-- Cards are siblings behind controls; they never capture pointer input.
+card(8, 118, "01   AUTOMACAO", "Controle a coleta automatica da partida.")
+card(138, 204, "02   CONFIGURACOES")
+card(354, 174, "03   ATIVIDADE EM TEMPO REAL")
+for _, control in ipairs({Toggle, SpeedLabel, DistanceLabel, SpeedMinus, SpeedPlus,
+    DistanceMinus, DistancePlus, ResetLabel, ResetToggle, EventLabel, EventToggle,
+    RoundLabel, BagLabel, FarmLabel, DropLabel, Hint}) do
+    control.ZIndex = 2
+    if control:IsA("TextLabel") then
+        control.TextColor3 = Theme.Text
+        control.TextSize = 12
+        control.TextTruncate = Enum.TextTruncate.AtEnd
+    end
+end
+Toggle.Position = UDim2.fromOffset(30, 76)
+Toggle.Size = UDim2.fromOffset(380, 36)
+Toggle.BackgroundColor3 = Color3.fromRGB(107, 62, 181)
+Toggle.TextSize = 13
+round(Toggle, 9)
+local function settingRow(l, minus, plus, y)
+    l.Position = UDim2.fromOffset(30, y)
+    l.Size = UDim2.fromOffset(258, 30)
+    minus.Position = UDim2.fromOffset(310, y)
+    plus.Position = UDim2.fromOffset(366, y)
+    minus.Size = UDim2.fromOffset(38, 30)
+    plus.Size = UDim2.fromOffset(38, 30)
+end
+settingRow(SpeedLabel, SpeedMinus, SpeedPlus, 177)
+settingRow(DistanceLabel, DistanceMinus, DistancePlus, 217)
+ResetLabel.Position = UDim2.fromOffset(30, 259)
+ResetLabel.Size = UDim2.fromOffset(266, 30)
+ResetToggle.Position = UDim2.fromOffset(316, 258)
+ResetToggle.Size = UDim2.fromOffset(88, 30)
+EventLabel.Position = UDim2.fromOffset(30, 299)
+EventLabel.Size = UDim2.fromOffset(266, 30)
+EventToggle.Position = UDim2.fromOffset(316, 298)
+EventToggle.Size = UDim2.fromOffset(88, 30)
+for i, l in ipairs({RoundLabel, BagLabel, FarmLabel, DropLabel}) do
+    l.Position = UDim2.fromOffset(30, 389 + (i - 1) * 30)
+    l.Size = UDim2.fromOffset(374, 26)
+    l.TextSize = 12
+end
+Hint.Position = UDim2.fromOffset(24, 540)
+Hint.Size = UDim2.fromOffset(394, 22)
+Hint.TextSize = 10
+Hint.TextColor3 = Theme.Muted
+Floating.BackgroundColor3 = Theme.Background
+Floating.TextColor3 = Theme.Accent
+Stroke.Color = Theme.Accent
+Stroke.Thickness = 1.5
+Resize.TextColor3 = Theme.Accent
+caption(Main, "ZYON  /  FARM v7.7", 16, 0, 220, 9).Position = UDim2.new(0, 16, 1, -22)
+local function polishButton(b)
+    b.AutoButtonColor = false
+    local border = outline(b, Theme.Accent, 0.75)
+    connect(b.MouseEnter, function() border.Transparency = 0.1 end)
+    connect(b.MouseLeave, function() border.Transparency = 0.75 end)
+    connect(b.InputBegan, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then border.Thickness = 2 end
+    end)
+    connect(b.InputEnded, function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then border.Thickness = 1 end
+    end)
+end
+for _, b in ipairs({Close, Minimize, Toggle, SpeedMinus, SpeedPlus,
+    DistanceMinus, DistancePlus, ResetToggle, EventToggle}) do
+    polishButton(b)
+end
+for _, b in ipairs({SpeedMinus, SpeedPlus, DistanceMinus, DistancePlus}) do
+    b.BackgroundColor3 = Color3.fromRGB(41, 34, 58)
+    b.TextColor3 = Theme.Text
+    b.TextSize = 18
+end
+local Gesture
+local RequestedSize = Vector2.new(300, 180)
+local function bounds()
+    local camera = workspace.CurrentCamera
+    local size = camera and camera.ViewportSize or Vector2.new(800, 600)
+    local topLeft, bottomRight = GuiService:GetGuiInset()
+    return Vector2.new(math.max(1, size.X - topLeft.X - bottomRight.X),
+        math.max(1, size.Y - topLeft.Y - bottomRight.Y))
+end
+local function clampObject(object, screen)
+    local p = object.Position
+    local size = Vector2.new(object.Size.X.Offset, object.Size.Y.Offset)
+    object.Position = UDim2.fromOffset(
+        math.clamp(p.X.Scale * screen.X + p.X.Offset, 0, math.max(0, screen.X - size.X)),
+        math.clamp(p.Y.Scale * screen.Y + p.Y.Offset, 0, math.max(0, screen.Y - size.Y)))
+end
+local function fit()
+    local screen = bounds()
+    local w = math.clamp(RequestedSize.X, math.min(300, screen.X), screen.X)
+    local h = math.clamp(RequestedSize.Y, math.min(180, screen.Y), screen.Y)
+    Main.Size = UDim2.fromOffset(w, h)
+    local scale = math.min(1, math.max(0.01, (w - 6) / 440))
+    ContentScale.Scale = scale
+    Content.Position = UDim2.fromOffset(math.max(0, (w - 440 * scale) / 2), 0)
+    Scroll.CanvasSize = UDim2.fromOffset(0, 574 * scale)
+    Floating.Size = UDim2.fromOffset(math.min(78, screen.X), math.min(36, screen.Y))
+    clampObject(Main, screen)
+    clampObject(Floating, screen)
+end
+local function setVisible(visible)
+    Gesture = nil
+    Main.Visible = visible
+    Floating.Visible = not visible
+    fit()
+end
+connect(Minimize.Activated, function() setVisible(false) end)
 connect(UIS.InputBegan, function(input, processed)
-    if not processed
-        and input.KeyCode == Enum.KeyCode.RightShift then
-        Gui.Enabled = not Gui.Enabled
+    if not processed and input.KeyCode == Enum.KeyCode.RightShift then
+        setVisible(not Main.Visible)
     end
 end)
-
--- ====================================
--- ARRASTAR INTERFACE
--- ====================================
-
-local Dragging = false
-local DragStart
-local StartPosition
-
+local function inside(object, point)
+    local p, size = object.AbsolutePosition, object.AbsoluteSize
+    return point.X >= p.X and point.Y >= p.Y
+        and point.X <= p.X + size.X and point.Y <= p.Y + size.Y
+end
+local function beginGesture(mode, object, input)
+    if Gesture then return end
+    if input.UserInputType ~= Enum.UserInputType.MouseButton1
+        and input.UserInputType ~= Enum.UserInputType.Touch then return end
+    fit()
+    Gesture = {mode = mode, object = object, input = input,
+        start = input.Position, position = object.Position,
+        size = Main.AbsoluteSize, moved = false}
+end
 connect(Top.InputBegan, function(input)
-    if input.UserInputType ==
-        Enum.UserInputType.MouseButton1 then
-        Dragging = true
-        DragStart = input.Position
-        StartPosition = Main.Position
-    end
+    if inside(Close, input.Position) or inside(Minimize, input.Position) then return end
+    beginGesture("move", Main, input)
 end)
-
-connect(UIS.InputEnded, function(input)
-    if input.UserInputType ==
-        Enum.UserInputType.MouseButton1 then
-        Dragging = false
-    end
-end)
-
+connect(Floating.InputBegan, function(input) beginGesture("floating", Floating, input) end)
+connect(Resize.InputBegan, function(input) beginGesture("resize", Main, input) end)
 connect(UIS.InputChanged, function(input)
-    if Dragging
-        and input.UserInputType ==
-            Enum.UserInputType.MouseMovement then
-
-        local delta = input.Position - DragStart
-
-        Main.Position = UDim2.new(
-            StartPosition.X.Scale,
-            StartPosition.X.Offset + delta.X,
-            StartPosition.Y.Scale,
-            StartPosition.Y.Offset + delta.Y
-        )
+    local g = Gesture
+    if not g then return end
+    local mouse = g.input.UserInputType == Enum.UserInputType.MouseButton1
+    if input ~= g.input and not (mouse and input.UserInputType == Enum.UserInputType.MouseMovement) then return end
+    local delta = input.Position - g.start
+    if delta.Magnitude >= 7 then g.moved = true end
+    if not g.moved then return end
+    if g.mode == "resize" then
+        local screen = bounds()
+        RequestedSize = Vector2.new(
+            math.clamp(g.size.X + delta.X, math.min(300, screen.X), screen.X),
+            math.clamp(g.size.Y + delta.Y, math.min(180, screen.Y), screen.Y))
+    else
+        g.object.Position = UDim2.fromOffset(g.position.X.Offset + delta.X,
+            g.position.Y.Offset + delta.Y)
+    end
+    fit()
+end)
+connect(UIS.InputEnded, function(input)
+    local g = Gesture
+    if not g or input ~= g.input then return end
+    Gesture = nil
+    local moved = g.moved or (input.Position - g.start).Magnitude >= 7
+    if g.mode == "floating" and not moved and inside(Floating, input.Position) then
+        setVisible(true)
     end
 end)
-
+connect(Floating.Activated, function(input)
+    if input and (input.UserInputType == Enum.UserInputType.Keyboard
+        or input.UserInputType.Name:match("Gamepad")) then setVisible(true) end
+end)
+connect(UIS.WindowFocusReleased, function() Gesture = nil end)
+local PreviousBounds
+local BoundsElapsed = 0
+connect(RunService.RenderStepped, function(dt)
+    BoundsElapsed = BoundsElapsed + dt
+    if BoundsElapsed < 0.2 then return end
+    BoundsElapsed = 0
+    local screen = bounds()
+    if screen ~= PreviousBounds then
+        PreviousBounds = screen
+        Gesture = nil
+        fit()
+    end
+end)
+connect(Gui.Destroying, shutdown)
+fit()
 -- ====================================
 -- PERSONAGEM
 -- ====================================
 
+-- Infection may replace body parts without firing CharacterAdded.
+-- Rebind only this character's parts; keep the current round and settings.
+local BodyRevision = 0
+local DeathConnection
+local function clearDeathConnection()
+    if not DeathConnection then return end
+    DeathConnection:Disconnect()
+    local index = table.find(CharacterConnections, DeathConnection)
+    if index then table.remove(CharacterConnections, index) end
+    DeathConnection = nil
+end
+local function refreshBody(character, revision)
+    if not Running or revision ~= BodyRevision or Character ~= character
+        or Player.Character ~= character then return end
+    local newHumanoid = character:FindFirstChildOfClass("Humanoid")
+    local newRoot = character:FindFirstChild("HumanoidRootPart")
+    if newRoot and not newRoot:IsA("BasePart") then newRoot = nil end
+    local newAnimate = character:FindFirstChild("Animate")
+    if newAnimate and not newAnimate:IsA("LocalScript") then newAnimate = nil end
+
+    -- Restore the old body before assigning the new references.
+    stopFlight()
+    resetTarget()
+    table.clear(Ignored)
+    table.clear(Coins)
+    clearDeathConnection()
+    Humanoid, Root, Animate = newHumanoid, newRoot, newAnimate
+    table.clear(BodyParts)
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then BodyParts[part] = true end
+    end
+    NextAnimationCheck, NextCollisionCheck, NextCoinSearch = 0, 0, 0
+    if newHumanoid then
+        DeathConnection = connect(newHumanoid.Died, function()
+            task.defer(function()
+                if not Running or Character ~= character or Player.Character ~= character then return end
+                if Humanoid ~= newHumanoid
+                    or character:FindFirstChildOfClass("Humanoid") ~= newHumanoid then return end
+                if newHumanoid.Health <= 0 then resetRound() end
+            end)
+        end, CharacterConnections)
+    end
+    if Enabled and RoundActive and not BagFull then
+        Status = newRoot and newHumanoid and "Corpo atualizado; retomando coleta"
+            or "Aguardando novas partes do corpo"
+    end
+end
 local function bindCharacter(character)
+    if not Running or Player.Character ~= character then return end
+    BodyRevision = BodyRevision + 1
     resetRound()
+    clearDeathConnection()
     disconnect(CharacterConnections)
-
-    Character = character
-    Humanoid = character:WaitForChild("Humanoid")
-    Root = character:WaitForChild("HumanoidRootPart")
-    Animate = character:FindFirstChild("Animate")
-
-    if not Running then return end
-
-    connect(
-        Humanoid.Died,
-        resetRound,
-        CharacterConnections
-    )
+    Character, Humanoid, Root, Animate = character, nil, nil, nil
+    local pending = false
+    local function scheduleRefresh(object)
+        if not Running or Character ~= character then return end
+        if object and not (object:IsA("BasePart") or object:IsA("Humanoid")
+            or object.Name == "Animate") then return end
+        -- Pause immediately while parts are being replaced. Coalesce the rest.
+        stopFlight()
+        resetTarget()
+        if pending then return end
+        pending = true
+        local revision = BodyRevision
+        task.defer(function()
+            pending = false
+            refreshBody(character, revision)
+        end)
+    end
+    connect(character.DescendantAdded, scheduleRefresh, CharacterConnections)
+    connect(character.DescendantRemoving, scheduleRefresh, CharacterConnections)
+    refreshBody(character, BodyRevision)
 end
-
-connect(Player.CharacterAdded, function(character)
-    task.spawn(bindCharacter, character)
+connect(Player.CharacterAdded, bindCharacter)
+connect(Player.CharacterRemoving, function(character)
+    if character ~= Character then return end
+    BodyRevision = BodyRevision + 1
+    resetRound()
+    clearDeathConnection()
+    disconnect(CharacterConnections)
+    Character, Humanoid, Root, Animate = nil, nil, nil, nil
 end)
-
-connect(Player.CharacterRemoving, resetRound)
-
-if Player.Character then
-    task.spawn(bindCharacter, Player.Character)
-end
-
+if Player.Character then bindCharacter(Player.Character) end
 connect(PlayerGui.DescendantAdded, function(object)
     if object.Name == "RoleSelector" then
         task.defer(bindRole)
@@ -959,6 +1329,7 @@ task.spawn(function()
         bindRole()
         checkBag()
 
+        if Main.Visible then
         SpeedLabel.Text =
             "Velocidade: " .. Config.Speed
 
@@ -992,6 +1363,7 @@ task.spawn(function()
         DropLabel.Text =
             "Descida inicial: " .. DropStatus
 
+        end -- visible interface
         task.wait(Config.ScanInterval)
     end
 end)
@@ -1089,6 +1461,9 @@ connect(RunService.Heartbeat, function(dt)
     -- ====================================
 
     if not Target then
+        local now = os.clock()
+        if now < NextCoinSearch then return end
+        NextCoinSearch = now + Config.ScanInterval
         Target = nearestCoin()
 
         if Target then
