@@ -41,7 +41,7 @@ local Enabled = false
 local Config = {
     Speed = 20,
     Distance = 1.5,
-    WaitTime = 0.5,
+    WaitTime = 0.25,
     ScanInterval = 0.3,
     InitialDrop = 4,
     MaxInitialDescent = 35,
@@ -552,6 +552,24 @@ local function findRoleSelector()
     return nil
 end
 
+local RefreshRoundBody
+local function beginRound()
+    if not Running then return end
+    -- Rebind first: a newly assigned character may reset the old round state.
+    if RefreshRoundBody then RefreshRoundBody() end
+    RoundActive = true
+    BagFull = false
+    ResetRequested = false
+    table.clear(Ignored)
+    resetTarget()
+    resetInitialDrop()
+    NextAnimationCheck, NextCollisionCheck, NextCoinSearch = 0, 0, 0
+    if Enabled then
+        refreshCoins()
+        Status = validCharacter() and "Partida iniciada; procurando moedas"
+            or "Aguardando partes atuais do corpo"
+    end
+end
 local function bindRole()
     local selector = findRoleSelector()
 
@@ -572,6 +590,7 @@ local function bindRole()
     end
 
     LastRoleVisible = selector.Visible
+    if LastRoleVisible and not RoundActive then beginRound() end
 
     RoleConnection =
         selector:GetPropertyChangedSignal("Visible")
@@ -584,13 +603,7 @@ local function bindRole()
             LastRoleVisible = visible
 
             if visible and not previous then
-                RoundActive = true
-                BagFull = false
-                ResetRequested = false
-
-                table.clear(Ignored)
-                resetTarget()
-                resetInitialDrop()
+                beginRound()
             end
         end)
 end
@@ -1338,6 +1351,15 @@ connect(Player.CharacterRemoving, function(character)
     disconnect(CharacterConnections)
     Character, Humanoid, Root, Animate = nil, nil, nil, nil
 end)
+RefreshRoundBody = function()
+    local current = Player.Character
+    if not current then return end
+    if Character ~= current then
+        bindCharacter(current)
+    else
+        refreshBody(current, BodyRevision)
+    end
+end
 if Player.Character then bindCharacter(Player.Character) end
 connect(PlayerGui.DescendantAdded, function(object)
     if object.Name == "RoleSelector" then
