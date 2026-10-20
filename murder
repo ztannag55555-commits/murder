@@ -776,7 +776,7 @@ local function label(parent, text, y, size)
 end
 
 local Title =
-    label(Top, "ykCota | FARM v7.7", 11, 16)
+    label(Top, "Proerd | FARM v7.7", 11, 16)
 Title.Font = Enum.Font.GothamBold
 
 local Close = Instance.new("TextButton")
@@ -999,7 +999,7 @@ Floating.BackgroundColor3 = Color3.fromRGB(20, 16, 30)
 Floating.TextColor3 = Color3.fromRGB(185, 125, 255)
 Floating.Font = Enum.Font.GothamBold
 Floating.TextSize = 14
-Floating.Text = "ykCota"
+Floating.Text = "Proerd"
 Floating.BorderSizePixel = 0
 Floating.Visible = false
 Floating.ZIndex = 20
@@ -1092,7 +1092,7 @@ local HeaderGradient = Instance.new("UIGradient")
 HeaderGradient.Color = ColorSequence.new(Color3.fromRGB(45, 28, 69), Color3.fromRGB(20, 20, 31))
 HeaderGradient.Rotation = 15
 HeaderGradient.Parent = Top
-Title.Text = "ykCota"
+Title.Text = "Proerd"
 Title.Position = UDim2.fromOffset(22, 10)
 Title.TextSize = 22
 Title.TextColor3 = Theme.Text
@@ -1177,7 +1177,7 @@ Floating.TextColor3 = Theme.Accent
 Stroke.Color = Theme.Accent
 Stroke.Thickness = 1.5
 Resize.TextColor3 = Theme.Accent
-caption(Main, "ykCota  /  FARM v7.7", 16, 0, 220, 9).Position = UDim2.new(0, 16, 1, -22)
+caption(Main, "Proerd  /  FARM v7.7", 16, 0, 220, 9).Position = UDim2.new(0, 16, 1, -22)
 local function polishButton(b)
     b.AutoButtonColor = false
     local border = outline(b, Theme.Accent, 0.75)
