@@ -36,6 +36,10 @@ if type(shared[KEY]) == "function" then
 end
 
 local Running = true
+local SessionStartedAt = os.clock()
+local SessionCoins = 0
+local PendingCoins = {}
+local CountedVisuals = setmetatable({}, {__mode = "k"})
 local Enabled = false
 
 local Config = {
@@ -431,6 +435,24 @@ local function refreshCoins()
         end
     end
 end
+-- Estimate only: visual disappearance near the player is not server confirmation.
+local function updateSessionCoins()
+    local now = os.clock()
+    for coin, record in pairs(PendingCoins) do
+        if not Running or not Enabled or not RoundActive or not validCharacter()
+            or now - record.time > 2 then
+            PendingCoins[coin] = nil
+        elseif not record.visual:IsDescendantOf(coin) or not coin:IsDescendantOf(workspace) then
+            -- Ignore a map-wide disappearance/end-of-round cleanup.
+            if #Coins > 0 and not CountedVisuals[record.visual]
+                and (Root.Position - record.position).Magnitude <= 8 then
+                SessionCoins = SessionCoins + 1
+                CountedVisuals[record.visual] = true
+            end
+            PendingCoins[coin] = nil
+        end
+    end
+end
 local function nearestCoin()
     if not validCharacter() then
         return nil
@@ -565,6 +587,7 @@ local function beginRound()
     BagFull = false
     ResetRequested = false
     table.clear(Ignored)
+    table.clear(PendingCoins)
     resetTarget()
     resetInitialDrop()
     NextAnimationCheck, NextCollisionCheck, NextCoinSearch = 0, 0, 0
@@ -899,6 +922,8 @@ local function shutdown()
 
     disconnect(CharacterConnections)
     disconnect(Connections)
+    table.clear(PendingCoins)
+    table.clear(CountedVisuals)
     table.clear(BodyParts)
     table.clear(CoinCandidates)
     table.clear(Coins)
@@ -1209,7 +1234,7 @@ do
     WhiteScreen.Name = "ZYON_WhiteScreen"
     WhiteScreen.ResetOnSpawn = false
     WhiteScreen.IgnoreGuiInset = true
-    WhiteScreen.DisplayOrder = 10000
+    WhiteScreen.DisplayOrder = -10000
     WhiteScreen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
     WhiteScreen.Enabled = false
     pcall(function() WhiteScreen.ScreenInsets = Enum.ScreenInsets.None end)
@@ -1222,7 +1247,7 @@ do
     cover.BackgroundColor3 = Color3.new(0, 0, 0)
     cover.BackgroundTransparency = 0
     cover.BorderSizePixel = 0
-    cover.Active = true
+    cover.Active = false
     cover.Parent = WhiteScreen
 
     local disable = Instance.new("TextButton")
@@ -1259,10 +1284,18 @@ do
     round(activate, 9)
     polishButton(activate)
     connect(activate.Activated, function()
-        if Running and WhiteScreen then WhiteScreen.Enabled = true end
+        if Running and WhiteScreen then
+            Main.Visible = false
+            Floating.Visible = false
+            WhiteScreen.Enabled = true
+        end
     end)
     connect(disable.Activated, function()
-        if WhiteScreen then WhiteScreen.Enabled = false end
+        if WhiteScreen then
+            WhiteScreen.Enabled = false
+            Main.Visible = true
+            Floating.Visible = false
+        end
     end)
     Hint.Position = UDim2.fromOffset(24, 640)
     Content.Size = UDim2.fromOffset(440, 674)
@@ -1278,6 +1311,53 @@ for _, object in ipairs(Content:GetDescendants()) do
     if object:IsA("Frame") or object:IsA("TextLabel") then
         object.Active = false
     end
+end
+card(640, 104, "05   SESSAO")
+local SessionCoinLabel = caption(Content, "Moedas coletadas (estimativa): 0", 30, 678, 374, 12, Theme.Text)
+local SessionTimeLabel = caption(Content, "Tempo em execucao: 00:00:00", 30, 708, 374, 12, Theme.Text)
+SessionCoinLabel.ZIndex = 2
+SessionTimeLabel.ZIndex = 2
+Hint.Position = UDim2.fromOffset(24, 754)
+Content.Size = UDim2.fromOffset(440, 786)
+-- Account identity appears before the farm controls.
+do
+    for _, item in ipairs(Content:GetChildren()) do
+        if item:IsA("GuiObject") then
+            local position = item.Position
+            item.Position = UDim2.new(position.X.Scale, position.X.Offset,
+                position.Y.Scale, position.Y.Offset + 84)
+        end
+    end
+    card(8, 72, "")
+    local avatar = Instance.new("ImageLabel")
+    avatar.Name = "AccountAvatar"
+    avatar.Position = UDim2.fromOffset(28, 17)
+    avatar.Size = UDim2.fromOffset(54, 54)
+    avatar.BackgroundColor3 = Color3.fromRGB(41, 34, 58)
+    avatar.BorderSizePixel = 0
+    avatar.ScaleType = Enum.ScaleType.Fit
+    avatar.ZIndex = 2
+    avatar.Parent = Content
+    round(avatar, 12)
+    outline(avatar, Theme.Accent, 0.5)
+    local display = caption(Content, Player.DisplayName, 96, 19, 306, 14, Theme.Text)
+    display.Font = Enum.Font.GothamBold
+    display.TextTruncate = Enum.TextTruncate.AtEnd
+    display.ZIndex = 2
+    local username = caption(Content, "@" .. Player.Name, 96, 44, 306, 11, Theme.Muted)
+    username.TextTruncate = Enum.TextTruncate.AtEnd
+    username.ZIndex = 2
+    connect(Player:GetPropertyChangedSignal("DisplayName"), function()
+        display.Text = Player.DisplayName
+    end)
+    task.spawn(function()
+        local ok, thumbnail = pcall(function()
+            return Players:GetUserThumbnailAsync(Player.UserId,
+                Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size150x150)
+        end)
+        if ok and Running and avatar.Parent then avatar.Image = thumbnail end
+    end)
+    Content.Size = UDim2.fromOffset(440, 870)
 end
 local Gesture
 local RequestedSize = Vector2.new(300, 180)
@@ -1303,12 +1383,17 @@ local function fit()
     local scale = math.min(1, math.max(0.01, (w - 6) / 440))
     ContentScale.Scale = scale
     Content.Position = UDim2.fromOffset(math.max(0, (w - 440 * scale) / 2), 0)
-    Scroll.CanvasSize = UDim2.fromOffset(0, 674 * scale)
+    Scroll.CanvasSize = UDim2.fromOffset(0, 870 * scale)
     Floating.Size = UDim2.fromOffset(math.min(78, screen.X), math.min(36, screen.Y))
     clampObject(Main, screen)
     clampObject(Floating, screen)
 end
 local function setVisible(visible)
+    if WhiteScreen and WhiteScreen.Enabled then
+        Main.Visible = false
+        Floating.Visible = false
+        return
+    end
     Gesture = nil
     Main.Visible = visible
     Floating.Visible = not visible
@@ -1512,11 +1597,15 @@ bindRole()
 task.spawn(function()
     while Running do
         refreshCoins()
+        updateSessionCoins()
         bindRole()
         checkVisualRoundEnd()
         checkBag()
 
         if Main.Visible then
+        local seconds = math.floor(os.clock() - SessionStartedAt)
+        SessionTimeLabel.Text = string.format("Tempo em execucao: %02d:%02d:%02d", math.floor(seconds / 3600), math.floor(seconds / 60) % 60, seconds % 60)
+        SessionCoinLabel.Text = "Moedas coletadas (estimativa): " .. SessionCoins
         SpeedLabel.Text =
             "Velocidade: " .. Config.Speed
 
@@ -1693,6 +1782,10 @@ connect(RunService.Heartbeat, function(dt)
 
         if reached then
             ReachedAt = os.clock()
+            local visual = Target:FindFirstChild("CoinVisual", true)
+            if visual and not CountedVisuals[visual] then
+                PendingCoins[Target] = {visual = visual, time = os.clock(), position = coinPosition(Target)}
+            end
             Status = "Testando coleta por baixo..."
         end
     else
