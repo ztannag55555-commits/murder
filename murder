@@ -39,7 +39,7 @@ local Running = true
 local Enabled = false
 
 local Config = {
-    Speed = 20,
+    Speed = 24,
     Distance = 1.5,
     WaitTime = 0.25,
     ScanInterval = 0.3,
@@ -64,12 +64,14 @@ local Attachment
 local Velocity
 
 local RoundActive = false
+local RoundHadVisualCoins = false
+local RoundStartedAt = 0
+local RoundDiagnostic = "Visuais: --"
+local NoVisualCoinsSince = nil
 local BagFull = false
 local ResetRequested = false
 
-local RoleSelector
 local RoleConnection
-local LastRoleVisible = false
 
 local Coins = {}
 local Ignored = {}
@@ -380,6 +382,8 @@ local function isEligibleCoin(object)
     if not object:IsA("BasePart") or object.Name ~= "Coin_Server" then
         return false
     end
+    -- Server placeholders persist after the round; collect only visual coins.
+    if not object:FindFirstChild("CoinVisual", true) then return false end
     -- CoinContainer pode estar dentro de qualquer mapa.
     local parent = object.Parent
     while parent and parent ~= workspace do
@@ -395,7 +399,16 @@ local function indexCoin(object)
         CoinCandidates[object] = true
     end
 end
-connect(workspace.DescendantAdded, indexCoin)
+connect(workspace.DescendantAdded, function(object)
+    indexCoin(object)
+    if object.Name == "CoinVisual" then
+        local parent = object.Parent
+        while parent and parent ~= workspace do
+            if CoinCandidates[parent] then Ignored[parent] = nil; break end
+            parent = parent.Parent
+        end
+    end
+end)
 connect(workspace.DescendantRemoving, function(object)
     CoinCandidates[object], Ignored[object] = nil, nil
 end)
@@ -428,6 +441,7 @@ local function nearestCoin()
 
     for _, coin in ipairs(Coins) do
         if coin:IsDescendantOf(workspace)
+            and isEligibleCoin(coin)
             and not Ignored[coin] then
 
             local position = coinPosition(coin)
@@ -526,6 +540,7 @@ local function resetFarm()
 end
 
 local function resetRound()
+    RoundHadVisualCoins, NoVisualCoinsSince = false, nil
     RoundActive = false
     BagFull = false
 
@@ -539,25 +554,14 @@ end
 -- DETECÇÃO DE PARTIDA
 -- ====================================
 
-local function findRoleSelector()
-    local main = PlayerGui:FindFirstChild("MainGUI")
-    local gameGui = main and main:FindFirstChild("Game")
-    local selector =
-        gameGui and gameGui:FindFirstChild("RoleSelector")
-
-    if selector and selector:IsA("GuiObject") then
-        return selector
-    end
-
-    return nil
-end
-
 local RefreshRoundBody
 local function beginRound()
     if not Running then return end
     -- Rebind first: a newly assigned character may reset the old round state.
     if RefreshRoundBody then RefreshRoundBody() end
     RoundActive = true
+    RoundStartedAt = os.clock()
+    RoundHadVisualCoins, NoVisualCoinsSince = false, nil
     BagFull = false
     ResetRequested = false
     table.clear(Ignored)
@@ -570,48 +574,95 @@ local function beginRound()
             or "Aguardando partes atuais do corpo"
     end
 end
-local function bindRole()
-    local selector = findRoleSelector()
-
-    if selector == RoleSelector then
-        return
+-- Track both normal and zombie selectors, even in different GUI branches.
+local RoleRecords = {}
+local RoleIndexDirty = true
+local AnyRoleVisible = false
+local function selectorShown(selector)
+    if not selector:IsDescendantOf(PlayerGui) then return false end
+    local current = selector
+    while current and current ~= PlayerGui do
+        if current:IsA("GuiObject") and not current.Visible then return false end
+        if current:IsA("ScreenGui") and not current.Enabled then return false end
+        current = current.Parent
     end
-
-    if RoleConnection then
-        RoleConnection:Disconnect()
-        RoleConnection = nil
-    end
-
-    RoleSelector = selector
-
-    if not selector then
-        LastRoleVisible = false
-        return
-    end
-
-    LastRoleVisible = selector.Visible
-    if LastRoleVisible and not RoundActive then beginRound() end
-
-    RoleConnection =
-        selector:GetPropertyChangedSignal("Visible")
-        :Connect(function()
-            if not Running then return end
-
-            local visible = selector.Visible
-            local previous = LastRoleVisible
-
-            LastRoleVisible = visible
-
-            if visible and not previous then
-                beginRound()
-            end
-        end)
+    return current == PlayerGui
 end
-
+local function evaluateRoles()
+    if not Running then return end
+    local shown, opened = false, false
+    -- Each selector has its own edge; an open zombie panel cannot mask
+    -- the normal selector opening (or vice versa).
+    for selector, record in pairs(RoleRecords) do
+        local visible = selectorShown(selector)
+        if visible and not record.visible then opened = true end
+        record.visible = visible
+        if visible then shown = true end
+    end
+    AnyRoleVisible = shown
+    if opened then beginRound() end
+end
+RoleConnection = {Disconnect = function()
+    for _, record in pairs(RoleRecords) do record.connection:Disconnect() end
+    table.clear(RoleRecords)
+end}
+local function bindRole()
+    if not Running then return end
+    if RoleIndexDirty then
+        RoleIndexDirty = false
+        for selector, record in pairs(RoleRecords) do
+            if not selector:IsDescendantOf(PlayerGui) then
+                record.connection:Disconnect()
+                RoleRecords[selector] = nil
+            end
+        end
+        -- Scan only at startup or when a selector is added/removed.
+        for _, object in ipairs(PlayerGui:GetDescendants()) do
+            if object:IsA("GuiObject") and (object.Name:lower() == "roleselector" or object.Name:lower() == "roleselection")
+                and not RoleRecords[object] then
+                local record = {visible = false}
+                record.connection = object:GetPropertyChangedSignal("Visible"):Connect(evaluateRoles)
+                RoleRecords[object] = record
+            end
+        end
+    end
+    -- Also observes visibility inherited from parents without extra connections.
+    evaluateRoles()
+end
 -- ====================================
 -- DETECTAR BOLSA CHEIA
 -- ====================================
 
+-- The server keeps Coin_Server placeholders after the visual coins vanish.
+-- End only after visual coins were actually observed and then disappeared.
+-- A slow initial spawn is not evidence that the round ended.
+local function checkVisualRoundEnd()
+    if not Running or not RoundActive then return end
+    local hasVisual = false
+    local visualCount = 0
+    for coin in pairs(CoinCandidates) do
+        if coin:IsDescendantOf(workspace) and coin:FindFirstChild("CoinVisual", true) then
+            local parent = coin.Parent
+            while parent and parent ~= workspace do
+                if parent.Name == "CoinContainer" then hasVisual = true; visualCount = visualCount + 1; break end
+                parent = parent.Parent
+            end
+        end
+    end
+    RoundDiagnostic = string.format("Visuais: %d | Inicio: %s", visualCount, RoundHadVisualCoins and "sim" or "nao")
+    if hasVisual then
+        RoundHadVisualCoins, NoVisualCoinsSince = true, nil
+    elseif RoundHadVisualCoins then
+        local now = os.clock()
+        NoVisualCoinsSince = NoVisualCoinsSince or now
+        if now - NoVisualCoinsSince >= 2 then
+            resetRound()
+            Status = Enabled and "Partida encerrada; aguardando proxima" or "Desativado"
+        end
+    else
+        NoVisualCoinsSince = nil
+    end
+end
 local function isVisible(object)
     local current = object
 
@@ -725,7 +776,7 @@ local function label(parent, text, y, size)
 end
 
 local Title =
-    label(Top, "ZYON | FARM v7.7", 11, 16)
+    label(Top, "ykCota | FARM v7.7", 11, 16)
 Title.Font = Enum.Font.GothamBold
 
 local Close = Instance.new("TextButton")
@@ -751,7 +802,7 @@ Toggle.Parent = Main
 corner(Toggle, 8)
 
 local SpeedLabel =
-    label(Main, "Velocidade: 20", 126)
+    label(Main, "Velocidade: 24", 126)
 
 local DistanceLabel =
     label(Main, "Altura abaixo da moeda: 1.5 studs", 166)
@@ -832,6 +883,7 @@ Hint.TextColor3 = Color3.fromRGB(170, 150, 195)
 -- ENCERRAMENTO
 -- ====================================
 
+local WhiteScreen
 local function shutdown()
     if not Running then return end
 
@@ -852,6 +904,7 @@ local function shutdown()
     table.clear(Coins)
     table.clear(Ignored)
 
+    if WhiteScreen then WhiteScreen:Destroy(); WhiteScreen = nil end
     Gui:Destroy()
 
     if shared[KEY] == shutdown then
@@ -946,7 +999,7 @@ Floating.BackgroundColor3 = Color3.fromRGB(20, 16, 30)
 Floating.TextColor3 = Color3.fromRGB(185, 125, 255)
 Floating.Font = Enum.Font.GothamBold
 Floating.TextSize = 14
-Floating.Text = "ZYON"
+Floating.Text = "ykCota"
 Floating.BorderSizePixel = 0
 Floating.Visible = false
 Floating.ZIndex = 20
@@ -1039,7 +1092,7 @@ local HeaderGradient = Instance.new("UIGradient")
 HeaderGradient.Color = ColorSequence.new(Color3.fromRGB(45, 28, 69), Color3.fromRGB(20, 20, 31))
 HeaderGradient.Rotation = 15
 HeaderGradient.Parent = Top
-Title.Text = "ZYON"
+Title.Text = "ykCota"
 Title.Position = UDim2.fromOffset(22, 10)
 Title.TextSize = 22
 Title.TextColor3 = Theme.Text
@@ -1110,6 +1163,11 @@ for i, l in ipairs({RoundLabel, BagLabel, FarmLabel, DropLabel}) do
     l.Size = UDim2.fromOffset(374, 26)
     l.TextSize = 12
 end
+FarmLabel.Size = UDim2.fromOffset(374, 42)
+FarmLabel.TextWrapped = true
+FarmLabel.TextTruncate = Enum.TextTruncate.None
+FarmLabel.TextSize = 10
+DropLabel.Position = UDim2.fromOffset(30, 498)
 Hint.Position = UDim2.fromOffset(24, 540)
 Hint.Size = UDim2.fromOffset(394, 22)
 Hint.TextSize = 10
@@ -1119,7 +1177,7 @@ Floating.TextColor3 = Theme.Accent
 Stroke.Color = Theme.Accent
 Stroke.Thickness = 1.5
 Resize.TextColor3 = Theme.Accent
-caption(Main, "ZYON  /  FARM v7.7", 16, 0, 220, 9).Position = UDim2.new(0, 16, 1, -22)
+caption(Main, "ykCota  /  FARM v7.7", 16, 0, 220, 9).Position = UDim2.new(0, 16, 1, -22)
 local function polishButton(b)
     b.AutoButtonColor = false
     local border = outline(b, Theme.Accent, 0.75)
@@ -1142,6 +1200,72 @@ for _, b in ipairs({SpeedMinus, SpeedPlus, DistanceMinus, DistancePlus}) do
     b.BackgroundColor3 = Color3.fromRGB(41, 34, 58)
     b.TextColor3 = Theme.Text
     b.TextSize = 18
+end
+-- Full-screen overlay has its own ScreenGui and never changes farm state.
+do
+    local stale = PlayerGui:FindFirstChild("ZYON_WhiteScreen")
+    if stale then stale:Destroy() end
+    WhiteScreen = Instance.new("ScreenGui")
+    WhiteScreen.Name = "ZYON_WhiteScreen"
+    WhiteScreen.ResetOnSpawn = false
+    WhiteScreen.IgnoreGuiInset = true
+    WhiteScreen.DisplayOrder = 10000
+    WhiteScreen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    WhiteScreen.Enabled = false
+    pcall(function() WhiteScreen.ScreenInsets = Enum.ScreenInsets.None end)
+    WhiteScreen.Parent = PlayerGui
+
+    local cover = Instance.new("Frame")
+    cover.Name = "WhiteCover"
+    cover.Size = UDim2.fromScale(1, 1)
+    cover.Position = UDim2.fromScale(0, 0)
+    cover.BackgroundColor3 = Color3.new(0, 0, 0)
+    cover.BackgroundTransparency = 0
+    cover.BorderSizePixel = 0
+    cover.Active = true
+    cover.Parent = WhiteScreen
+
+    local disable = Instance.new("TextButton")
+    disable.Name = "DisableWhiteScreen"
+    disable.AnchorPoint = Vector2.new(0.5, 0.5)
+    disable.Position = UDim2.fromScale(0.5, 0.5)
+    disable.Size = UDim2.new(0.8, 0, 0, 40)
+    disable.BackgroundColor3 = Theme.Background
+    disable.TextColor3 = Theme.Text
+    disable.Text = "DESATIVAR TELA PRETA"
+    disable.Font = Enum.Font.GothamBold
+    disable.TextSize = 11
+    disable.Modal = true
+    disable.ZIndex = 2
+    disable.Parent = cover
+    local limit = Instance.new("UISizeConstraint")
+    limit.MaxSize = Vector2.new(230, 40)
+    limit.Parent = disable
+    round(disable, 12)
+    outline(disable, Theme.Accent)
+
+    card(540, 88, "04   EXIBICAO")
+    local activate = Instance.new("TextButton")
+    activate.Name = "WhiteScreenOption"
+    activate.Position = UDim2.fromOffset(30, 576)
+    activate.Size = UDim2.fromOffset(380, 36)
+    activate.BackgroundColor3 = Color3.fromRGB(41, 34, 58)
+    activate.TextColor3 = Theme.Text
+    activate.Text = "TELA PRETA"
+    activate.Font = Enum.Font.GothamBold
+    activate.TextSize = 13
+    activate.ZIndex = 2
+    activate.Parent = Content
+    round(activate, 9)
+    polishButton(activate)
+    connect(activate.Activated, function()
+        if Running and WhiteScreen then WhiteScreen.Enabled = true end
+    end)
+    connect(disable.Activated, function()
+        if WhiteScreen then WhiteScreen.Enabled = false end
+    end)
+    Hint.Position = UDim2.fromOffset(24, 640)
+    Content.Size = UDim2.fromOffset(440, 674)
 end
 -- Touch scrolling is handled by Roblox's ScrollingFrame, including inertia
 -- and gesture cancellation on buttons. Only the title bar moves the window.
@@ -1179,7 +1303,7 @@ local function fit()
     local scale = math.min(1, math.max(0.01, (w - 6) / 440))
     ContentScale.Scale = scale
     Content.Position = UDim2.fromOffset(math.max(0, (w - 440 * scale) / 2), 0)
-    Scroll.CanvasSize = UDim2.fromOffset(0, 574 * scale)
+    Scroll.CanvasSize = UDim2.fromOffset(0, 674 * scale)
     Floating.Size = UDim2.fromOffset(math.min(78, screen.X), math.min(36, screen.Y))
     clampObject(Main, screen)
     clampObject(Floating, screen)
@@ -1289,6 +1413,7 @@ local function refreshBody(character, revision)
     if newAnimate and not newAnimate:IsA("LocalScript") then newAnimate = nil end
 
     -- Restore the old body before assigning the new references.
+    local resumeFlight = Flying and Enabled and RoundActive and not BagFull
     stopFlight()
     resetTarget()
     table.clear(Ignored)
@@ -1310,6 +1435,10 @@ local function refreshBody(character, revision)
             end)
         end, CharacterConnections)
     end
+    if resumeFlight and validCharacter() then
+        startFlight()
+        holdPose()
+    end
     if Enabled and RoundActive and not BagFull then
         Status = newRoot and newHumanoid and "Corpo atualizado; retomando coleta"
             or "Aguardando novas partes do corpo"
@@ -1327,8 +1456,8 @@ local function bindCharacter(character)
         if not Running or Character ~= character then return end
         if object and not (object:IsA("BasePart") or object:IsA("Humanoid")
             or object.Name == "Animate") then return end
-        -- Pause immediately while parts are being replaced. Coalesce the rest.
-        stopFlight()
+        -- Keep the flight constraint until the batched body refresh. Removing
+        -- it immediately can leave the character falling between frames.
         resetTarget()
         if pending then return end
         pending = true
@@ -1362,7 +1491,14 @@ RefreshRoundBody = function()
 end
 if Player.Character then bindCharacter(Player.Character) end
 connect(PlayerGui.DescendantAdded, function(object)
-    if object.Name == "RoleSelector" then
+    if object:IsA("GuiObject") and (object.Name:lower() == "roleselector" or object.Name:lower() == "roleselection") then
+        RoleIndexDirty = true
+        task.defer(bindRole)
+    end
+end)
+connect(PlayerGui.DescendantRemoving, function(object)
+    if RoleRecords[object] then
+        RoleIndexDirty = true
         task.defer(bindRole)
     end
 end)
@@ -1377,6 +1513,7 @@ task.spawn(function()
     while Running do
         refreshCoins()
         bindRole()
+        checkVisualRoundEnd()
         checkBag()
 
         if Main.Visible then
@@ -1408,7 +1545,7 @@ task.spawn(function()
                 )
             )
 
-        FarmLabel.Text = "Farm: " .. Status
+        FarmLabel.Text = "Farm: " .. Status .. "\n" .. RoundDiagnostic
 
         DropLabel.Text =
             "Descida inicial: " .. DropStatus
@@ -1464,6 +1601,7 @@ connect(RunService.Heartbeat, function(dt)
         return
     end
 
+
     if not Flying then
         startFlight()
     end
@@ -1506,6 +1644,16 @@ connect(RunService.Heartbeat, function(dt)
         end
     end
 
+    -- Pose and initial descent run at round start, before coins spawn.
+    -- Keep holding below the floor while waiting; resetRound releases flight.
+    if #Coins == 0 then
+        resetTarget()
+        Status = "Deitado abaixo do piso; aguardando moedas"
+        if DropStatus ~= "Concluída" then
+            Status = "Deitado; aguardando moedas"
+        end
+        return
+    end
     -- ====================================
     -- FARM DE MOEDAS
     -- ====================================
@@ -1525,7 +1673,7 @@ connect(RunService.Heartbeat, function(dt)
         end
     end
 
-    if not Target:IsDescendantOf(workspace) then
+    if not Target:IsDescendantOf(workspace) or not isEligibleCoin(Target) then
         resetTarget()
         return
     end
