@@ -73,6 +73,7 @@ local RoundStartedAt = 0
 local RoundDiagnostic = "Visuais: --"
 local NoVisualCoinsSince = nil
 local BagFull = false
+local FullBagCharacter = nil
 local ResetRequested = false
 
 local RoleConnection
@@ -581,6 +582,7 @@ local function beginRound()
     if not Running then return end
     -- Rebind first: a newly assigned character may reset the old round state.
     if RefreshRoundBody then RefreshRoundBody() end
+    FullBagCharacter = nil
     RoundActive = true
     RoundStartedAt = os.clock()
     RoundHadVisualCoins, NoVisualCoinsSince = false, nil
@@ -661,6 +663,12 @@ end
 -- A slow initial spawn is not evidence that the round ended.
 local function checkVisualRoundEnd()
     if not Running or not RoundActive then return end
+    -- A full bag can hide the coins locally while the round is still running.
+    -- Preserve the full-bag state until Heartbeat has performed the reset.
+    if Enabled and Config.ResetOnFullBag and BagFull and validCharacter() then
+        NoVisualCoinsSince = nil
+        return
+    end
     local hasVisual = false
     local visualCount = 0
     for coin in pairs(CoinCandidates) do
@@ -706,31 +714,41 @@ local function isVisible(object)
     return current == PlayerGui
 end
 
--- Cache full-bag notices in MainGUI, CrossPlatform and event interfaces.
+-- Cache text objects once, including the independent mobile bag notice.
+-- Updates read the cache rather than rescanning the whole PlayerGui.
 local BagNotifications = {}
 local function indexBagNotification(object)
-    if object:IsA("GuiObject") and object.Name:lower() == "fullbagnotification" then
-        BagNotifications[object] = true
+    if object:IsA("TextLabel") or object:IsA("TextButton") then
+        if not object:FindFirstAncestor("ZYON_FARM_V76")
+            and not object:FindFirstAncestor("ZYON_WhiteScreen") then
+            BagNotifications[object] = true
+        end
     end
 end
 for _, object in ipairs(PlayerGui:GetDescendants()) do indexBagNotification(object) end
 connect(PlayerGui.DescendantAdded, indexBagNotification)
 connect(PlayerGui.DescendantRemoving, function(object) BagNotifications[object] = nil end)
-local function checkBag()
-    if not RoundActive or BagFull then return end
-    local function hasFullText(object)
-        if not (object:IsA("TextLabel") or object:IsA("TextButton")) then return false end
-        if not isVisible(object) then return false end
-        local value = string.upper(object.Text):gsub("<[^>]->", ""):gsub("%s+", " ")
-        return value:find("COIN BAG FULL", 1, true) ~= nil
-            or value:find("BOLSA CHEIA", 1, true) ~= nil
-            or value:find("SACO CHEIO", 1, true) ~= nil
+local function checkBag(force)
+    if not Running or not validCharacter() then return end
+    if force and FullBagCharacter == Character then
+        BagFull = true
+        return
     end
-    for notification in pairs(BagNotifications) do
-        if notification:IsDescendantOf(PlayerGui) and isVisible(notification) then
-            if hasFullText(notification) then BagFull = true; return end
-            for _, child in ipairs(notification:GetDescendants()) do
-                if hasFullText(child) then BagFull = true; return end
+    if (not RoundActive and not force) or BagFull then return end
+    for object in pairs(BagNotifications) do
+        if object:IsDescendantOf(PlayerGui)
+            and not object:FindFirstAncestor("ZYON_FARM_V76") then
+            local value = string.upper(object.Text):gsub("<[^>]->", ""):gsub("%s+", " ")
+            local full = value:find("COIN BAG FULL", 1, true)
+                or value:find("BAG IS FULL", 1, true)
+                or value:find("BAG FULL", 1, true)
+                or value:find("BOLSA CHEIA", 1, true)
+                or value:find("SACO CHEIO", 1, true)
+            if full and object.TextTransparency < 0.99 and isVisible(object) then
+                BagFull = true
+                FullBagCharacter = Character
+                Status = "Bolsa cheia detectada"
+                return
             end
         end
     end
@@ -942,6 +960,7 @@ end)
 
 connect(ResetToggle.Activated, function()
     Config.ResetOnFullBag = not Config.ResetOnFullBag
+    if Config.ResetOnFullBag then checkBag(true) end
 
     ResetToggle.Text =
         Config.ResetOnFullBag and "ON" or "OFF"
@@ -1515,6 +1534,7 @@ end
 local function bindCharacter(character)
     if not Running or Player.Character ~= character then return end
     BodyRevision = BodyRevision + 1
+    FullBagCharacter = nil
     resetRound()
     clearDeathConnection()
     disconnect(CharacterConnections)
@@ -1543,6 +1563,7 @@ connect(Player.CharacterAdded, bindCharacter)
 connect(Player.CharacterRemoving, function(character)
     if character ~= Character then return end
     BodyRevision = BodyRevision + 1
+    FullBagCharacter = nil
     resetRound()
     clearDeathConnection()
     disconnect(CharacterConnections)
@@ -1582,8 +1603,8 @@ task.spawn(function()
         refreshCoins()
         updateSessionCoins()
         bindRole()
-        checkVisualRoundEnd()
         checkBag()
+        checkVisualRoundEnd()
 
         if Main.Visible then
         local seconds = math.floor(os.clock() - SessionStartedAt)
@@ -1636,7 +1657,7 @@ connect(RunService.Heartbeat, function(dt)
 
     -- NOVO: RESET AUTOMÁTICO AO ENCHER
     if Enabled
-        and RoundActive
+        and FullBagCharacter == Character
         and BagFull
         and Config.ResetOnFullBag
         and not ResetRequested
@@ -1652,7 +1673,7 @@ connect(RunService.Heartbeat, function(dt)
         local ok = pcall(function() resetHumanoid.Health = 0 end)
         task.delay(0.5, function()
             if not Running or not ResetRequested or not Config.ResetOnFullBag
-                or not Enabled or not RoundActive or not BagFull
+                or not Enabled or FullBagCharacter ~= resetCharacter
                 or Player.Character ~= resetCharacter or Humanoid ~= resetHumanoid then return end
             if resetHumanoid.Parent and resetHumanoid.Health > 0 then
                 local fallbackOK, err = pcall(function() resetCharacter:BreakJoints() end)
