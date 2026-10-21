@@ -706,53 +706,35 @@ local function isVisible(object)
     return current == PlayerGui
 end
 
+-- Cache full-bag notices in MainGUI, CrossPlatform and event interfaces.
+local BagNotifications = {}
+local function indexBagNotification(object)
+    if object:IsA("GuiObject") and object.Name:lower() == "fullbagnotification" then
+        BagNotifications[object] = true
+    end
+end
+for _, object in ipairs(PlayerGui:GetDescendants()) do indexBagNotification(object) end
+connect(PlayerGui.DescendantAdded, indexBagNotification)
+connect(PlayerGui.DescendantRemoving, function(object) BagNotifications[object] = nil end)
 local function checkBag()
-    if not RoundActive or BagFull then
-        return
-    end
-
-    local main = PlayerGui:FindFirstChild("MainGUI")
-    local gameGui = main and main:FindFirstChild("Game")
-    local bags = gameGui and gameGui:FindFirstChild("CoinBags")
-
-    local notification =
-        bags and bags:FindFirstChild(
-            "FullBagNotification",
-            true
-        )
-
-    if not notification or not isVisible(notification) then
-        return
-    end
-
+    if not RoundActive or BagFull then return end
     local function hasFullText(object)
-        if object:IsA("TextLabel")
-            or object:IsA("TextButton") then
-
-            return string.find(
-                string.upper(object.Text),
-                "COIN BAG FULL!",
-                1,
-                true
-            ) ~= nil
-        end
-
-        return false
+        if not (object:IsA("TextLabel") or object:IsA("TextButton")) then return false end
+        if not isVisible(object) then return false end
+        local value = string.upper(object.Text):gsub("<[^>]->", ""):gsub("%s+", " ")
+        return value:find("COIN BAG FULL", 1, true) ~= nil
+            or value:find("BOLSA CHEIA", 1, true) ~= nil
+            or value:find("SACO CHEIO", 1, true) ~= nil
     end
-
-    if hasFullText(notification) then
-        BagFull = true
-        return
-    end
-
-    for _, child in ipairs(notification:GetDescendants()) do
-        if hasFullText(child) then
-            BagFull = true
-            return
+    for notification in pairs(BagNotifications) do
+        if notification:IsDescendantOf(PlayerGui) and isVisible(notification) then
+            if hasFullText(notification) then BagFull = true; return end
+            for _, child in ipairs(notification:GetDescendants()) do
+                if hasFullText(child) then BagFull = true; return end
+            end
         end
     end
 end
-
 -- ====================================
 -- INTERFACE
 -- ====================================
@@ -922,6 +904,7 @@ local function shutdown()
 
     disconnect(CharacterConnections)
     disconnect(Connections)
+    table.clear(BagNotifications)
     table.clear(PendingCoins)
     table.clear(CountedVisuals)
     table.clear(BodyParts)
@@ -1665,7 +1648,18 @@ connect(RunService.Heartbeat, function(dt)
         resetFarm()
 
         -- Solicita o reset uma única vez.
-        Humanoid.Health = 0
+        local resetCharacter, resetHumanoid = Character, Humanoid
+        local ok = pcall(function() resetHumanoid.Health = 0 end)
+        task.delay(0.5, function()
+            if not Running or not ResetRequested or not Config.ResetOnFullBag
+                or not Enabled or not RoundActive or not BagFull
+                or Player.Character ~= resetCharacter or Humanoid ~= resetHumanoid then return end
+            if resetHumanoid.Parent and resetHumanoid.Health > 0 then
+                local fallbackOK, err = pcall(function() resetCharacter:BreakJoints() end)
+                if not fallbackOK then warn("[Proerd] Falha no reset: " .. tostring(err)) end
+            end
+        end)
+        if not ok then Status = "Tentando resetar personagem" end
 
         return
     end
